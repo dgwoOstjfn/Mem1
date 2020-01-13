@@ -1,0 +1,583 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.16">
+  <POU Name="Mo20_St55_cleaning_and_empty_check" Id="{0394ee9f-e250-4af1-a628-7c3d1b1cfbc8}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK Mo20_St55_cleaning_and_empty_check
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<DESC>
+=INSERT DESCRIPTION FROM WORKFLOWPLAN=
+</DESC>
+
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-11-06	|	1.00	|	DWO		|	initial version
+
+</CHANGES>
+<VERSION>
+1.00
+</VERSION>
+
+<DEPENDENCIES>
+;
+</DEPENDENCIES>
+
+
+
+ -- overview of areas for steps --
+Steps [000..099]: 	Whatever Block
+Steps [100..199]:	Next Whatever Block
+
+  
+----------------------------------------------------------------------------------------*)
+
+
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	OrderNr: 			INT :=1;		(* Nr. Actorder *)
+	MoNr: 				INT:= 20;		(* Module-Number *)
+	StNr: 				INT:= 55;		(* Stationsnumber *)
+	BedienEinheit: 		ZENTR_DATA;		(* Central *)
+	FaultID: 			BYTE := 0;		(* ID for Error Array *)
+	DisplayNr: 			INT := 1;		(* Number of Textdisplay *)
+	MPart: 				INT := 1;		(* Machinepart *)
+	in_InitChainTxt:	STRING(39);		(* String for Step Chain Diagnosis *)
+	in_sKebaKurz:		STRING(gcKebaStKurzLen) := '1234567890'; (* optional - can also be assigned in initialisation paragraph *)
+	in_sKebaBez:		STRING(gcKebaStBezLen) 	:= '11111111112222222222333333333344444444445555555555'; (* optional - can also be assigned in initialisation paragraph *)
+END_VAR
+
+
+(* __________________ *)
+(* -- RT-Interface -- *)
+VAR_INPUT
+	RtNr:				INT := 01;
+	RtStNr:				SINT := 05;
+	RtStartimpuls:		BOOL:=FALSE;	
+END_VAR
+
+VAR_IN_OUT
+	//io_RtRegister:		ARRAY[1..6] OF ARRAY[1..4] OF DataTeil_pcb; // info for all parts within roundtable - the part for the station is accessed at [RtStNr]
+	io_RtStarts:		DWORD; // bit array (dword) representing station is working on roundtable (flow based)
+	io_RtFreigabe:		DWORD; // bit array (dword) representing station is giving permission for table to move (state based)
+	io_RtFault:			DWORD; // bit array (dword) representing error at RtStNr of roundtable
+	io_RtWaiting:		DWORD; // bit array (dword) representing waiting at RtStNr of roundtable
+	io_RtWarning:		DWORD; // bit array (dword) representing warning at RtStNr of roundtable
+END_VAR
+
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	SWI: 				BOOL := FALSE;	(* Impulse step is changing forward *)
+	SWR:				BOOL := FALSE;	(* Impulse step is changing backwards *)
+	Schritt: 			INT := 0;		(* Current step *)
+	UZ: 				TON;			(* watchtime *)
+	Fault: 				BOOL;			(* Stations Error *)
+	Waiting:			BOOL;			(* Station Waiting *)
+	Warning:			BOOL;			(* Station Warning *)
+	Betrieb: 			BOOL;			(* Enable Steps *)
+	StatEin: 			BOOL;			(* Station on *)
+	AllInPos: 			BOOL;			(* all cylinders in position and not actuated manually *)
+	Active:				BOOL;			(* stepchain is marked as active *)
+	Transport:			BOOL;			(* manual transport is enabled *)
+	InitRun:			BOOL;			(* goto homepos is enabled *)
+	CycleRun:			BOOL;			(* mode for single cycle is enabled *)
+	ManualRun:			BOOL;			(* move cylinders manually is enabled *)
+	BackwardsRun:		BOOL;			(* backwards run is enabled *)
+	tonSeitSwi:			TON;			(* time since last change of step *)
+	tonSeitAllInPos:	TON;			(* time since AllInPos has become TRUE *)
+	i:					INT;			(* index-runner for loops *)
+	j:					INT;			(* index-runner for loops *)
+	xx:					FB_StepTracker;	(* auto record steps *)
+	StatString:			STRING(10);		(* '+MM=SS' *)
+	StartCondition:		BOOL;			(* condition for starting station *)
+	bStart:				BOOL;			(* station's work on roundtable is running *)
+	NestNr:				INT;			(* number of nest within fixation *)
+END_VAR
+
+VAR CONSTANT	
+NEST1 :				INT :=1;
+NEST2 :				INT :=2;
+NEST3 :   			INT :=3;
+NEST4 :				INT :=4;
+END_VAR
+
+(* ___________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrZyl, Nr:= 196, Txt:='=055-BG2 '),
+	(* Error 02 *)		(Prio := ErrZyl, Nr:= 196, Txt:='=055-BG3 '),
+	(* Error 03 *)		(Prio := ErrZyl, Nr:= 196, Txt:='=055-BG4 '),
+	(* Error 04 *)		(Prio := ErrZyl, Nr:= 196, Txt:='=055-BG5 '),
+	(* Error 05 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/05            '),
+	(* Error 06 *)		(Prio := ErrZyl, Nr:= 2551, Txt:='dynamic text '),
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/10            '),
+	(* Error 11 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/11            '),
+	(* Error 12 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/12            '),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13            '),
+	(* Error 14 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/14            '),
+	(* Error 15 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/15            '),
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/16            ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ;
+END_VAR
+
+
+VAR CONSTANT
+(* -- Error-EmptyCheck -- *)
+feEmptyCheck						: ARRAY[1..4] OF INT :=[1,2,3,4];
+
+feWaitForTaifunAtCorrectSpeed		: INT := 6;
+
+
+END_VAR
+
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+
+(* == Valve == *)
+ValveTaifun					:ZYL0; (* MM1 *)
+
+(* == Escherich Taifun == *)
+ton_1s						:TON;
+ton_impuls					:TON;
+BDE_diTaifunUL_SpeedRpm		:DINT :=0;
+BDE_diTaifunLL_SpeedRpm		:DINT :=0;
+
+ixTaifunRotorSensor			:BOOL :=FALSE;
+rtTaifunRotorSensor			:R_TRIG;
+
+_diCurrentMotorCounts		:DINT :=0;
+_arr_diSpeedMotorPerSecond	:ARRAY[1..3] OF DINT;
+_diSpeedMotorPerMinuteMw	:DINT;
+
+(* == EmptyCheck == *)
+ixEmptyCheckCavity			:ARRAY[1..4] OF BOOL :=[FALSE,FALSE,FALSE,FALSE];
+bAllCavitiesEmpty			: BOOL :=FALSE;
+
+
+
+
+END_VAR
+
+
+
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+END_VAR
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+(* -- Initialisation -- *)
+IF neustart OR g_bOnlineChange THEN
+	StatString 		:= RIGHT(CONCAT( '000',INT_TO_STRING(StNr) ),3); (* three digits station's prefix is being created automatically for station *)
+	in_InitChainTxt := CONCAT( StatString, ' §Clean§ §Carrier§ / §Empty Check§' );
+	in_sKebaKurz	:= CONCAT( StatString, ' Cleaning'); // 3+7 digits
+	in_sKebaBez		:= in_InitChainTxt;
+END_IF
+
+
+KebaInitStation(
+	Panelnummer		:= gKebaAktPanel,
+	Aktiv			:= TRUE,
+	Kurzbezeichnung	:= in_sKebaKurz,
+	Bezeichnung		:= in_sKebaBez,
+	ManuellAktiv	:= TRUE,
+	RueckwaertsAktiv:= FALSE,
+	GsAktiv			:= FALSE,
+);
+
+
+(* _______________________________________ *)
+(* -- Entry for Step Sequence Diagnosis -- *)
+InitChain(
+	Step 			:= Schritt,
+	InitialState 	:= TRUE,
+	Fault 			:= Fault,
+	Waiting 		:= Waiting,
+	Warning 		:= Warning,
+	AllInPos 		:= AllInPos,
+	RunOpenDoor 	:= TRUE,
+	Txt 			:= in_InitChainTxt,
+	BedienEinheit 	:= BedienEinheit,
+	Active 			:= Active,
+	Transport 		:= Transport,
+	InitRun 		:= InitRun,
+	CycleRun 		:= CycleRun,
+	ManualRun 		:= ManualRun,
+	BackwardsRun 	:= BackwardsRun);
+InitRun := FALSE;
+
+
+(* _______________ *)
+(* -- Parameter -- *)
+StatEin 	:= ActOrd[MPart].ord_stat[OrderNr].sd_ein;
+BDE_diTaifunUL_SpeedRpm	:= ActOrd[MPart].ord_stat[OrderNr].sd_p1;
+BDE_diTaifunLL_SpeedRpm	:= ActOrd[MPart].ord_stat[OrderNr].sd_p2;
+
+
+(* ____________ *)
+(* -- Inputs -- *)
+ixTaifunRotorSensor			:=_055_M20_MP1_BG1;
+
+ixEmptyCheckCavity[NEST1]	:=_055_M20_MP1_BG2;
+ixEmptyCheckCavity[NEST2]	:=_055_M20_MP1_BG3;
+ixEmptyCheckCavity[NEST3]	:=_055_M20_MP1_BG4;
+ixEmptyCheckCavity[NEST4]	:=_055_M20_MP1_BG5;
+
+
+(* _______________________ *)
+(* -- Timer / Watchdogs -- *)
+UZ( IN:= NOT SWI AND BedienEinheit.grundbed, PT:= T#5s );
+tonSeitSwi( IN := NOT SWI AND Bedieneinheit.grundbed, PT := t#30d );
+tonSeitAllInPos( IN := AllInPos AND Bedieneinheit.grundbed, PT := t#30d );
+
+
+(* _______________ *)
+(* -- Cylinders -- *)
+
+ValveTaifun(
+	on:= , 
+	enable_man:= Bedieneinheit.ventile_ok, 
+	FNrMan		:=2550,
+	on_vz		:= T#4S, 
+	off_vz		:= T#0S, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '1', 
+	txtVentil	:= 'MZ1', 
+	ID			:= FaultID, 
+	Bild		:= picStandardSchalterAus, 
+	BildB		:= picStandardSchalterEin,
+);
+
+AllInPos :=	ValveTaifun.pos;
+
+(* count motor pulses *)
+rtTaifunRotorSensor( CLK := ixTaifunRotorSensor );
+IF rtTaifunRotorSensor.Q THEN
+	_diCurrentMotorCounts := _diCurrentMotorCounts + 1;
+END_IF
+
+ton_1s( IN := NOT ton_1s.Q AND valveTaifun.y, PT := T#1S ); // start to count pulses with valve on
+IF ton_1s.Q 
+THEN
+	(* shift past 3 seconds in shiftregister *)
+	_arr_diSpeedMotorPerSecond[3] 	:= _arr_diSpeedMotorPerSecond[2];
+	_arr_diSpeedMotorPerSecond[2] 	:= _arr_diSpeedMotorPerSecond[1];
+	_arr_diSpeedMotorPerSecond[1] 	:= _diCurrentMotorCounts; (* save counts of the last second to "speed per second" at [1] *) 
+	_diCurrentMotorCounts 			:= 0; (* reset temporary counts *)
+
+	(* calculate rpm by adding pulses of past 3 sec. * 20 = 60 sec. (=> result = rpm / minute) *) 
+	_diSpeedMotorPerMinuteMw		:=
+		(	_arr_diSpeedMotorPerSecond[1]
+		+ 	_arr_diSpeedMotorPerSecond[2]
+		+ 	_arr_diSpeedMotorPerSecond[3]
+		)
+		*	20 /2 (* / 2 Pulses per Round *); 
+	
+END_IF
+
+(* __________________ *)
+(* -- EmptyCheck all cavities-- *)
+bAllCavitiesEmpty		:= NOT (ixEmptyCheckCavity[NEST1]
+							OR 	ixEmptyCheckCavity[NEST2]
+							OR  ixEmptyCheckCavity[NEST3]
+							OR  ixEmptyCheckCavity[NEST4]);
+
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID, FAnz:= DisplayNr, EF:= Errors1, F:= f1 );
+
+Fault	:= ValveTaifun.err	(* Error´s of function blocks *);
+Warning := FALSE;
+Waiting := FALSE;
+FOR i := 1 TO ErrMaxBits BY 1 DO
+	IF f1[i] THEN
+		IF 		Errors1[i].Prio <= ErrZyl 			THEN Fault := TRUE;
+		ELSIF	Errors1[i].Prio <= ErrEndl 			THEN Waiting := TRUE; f1[i] := FALSE;
+		ELSIF	Errors1[i].Prio <= ErrWechselpos	THEN Warning := TRUE; f1[i] := FALSE; END_IF
+	END_IF
+END_FOR
+
+
+// report Error, Waiting and Warning to cell
+IF Fault 	THEN io_RtFault 	:= SETBIT32( io_RtFault,   RtStNr ); END_IF
+IF Waiting 	THEN io_RtWaiting 	:= SETBIT32( io_RtWaiting, RtStNr ); END_IF
+IF Warning	THEN io_RtWarning	:= SETBIT32( io_RtWarning, RtStNr ); END_IF
+
+
+(* Create Errrors / Misc. Errors *)
+
+
+(* __________________________________ *)
+(* -- Station - Allowed to Operate -- *)
+Betrieb := 	Bedieneinheit.betrieb
+		AND NOT Fault
+		AND NOT ManualRun
+		AND BedienEinheit.ventile_ok;
+
+
+(* ____________________ *)
+(* -- Start Station  -- *)
+IF 	RtStartimpuls THEN
+	StartCondition 
+		:= 	StatEin;
+		
+					
+	IF StartCondition THEN bStart := TRUE; END_IF
+END_IF
+
+
+(* ________________ *)
+(* -- Step-Chain -- *)
+xx( iStep := Schritt );
+
+(* reset flags *)
+SWI := FALSE;
+
+CASE Schritt OF
+0:	xx.x := 'in basepos. - wait for prework or station´s start';
+	IF  AllInPos
+	AND bStart
+	AND BedienEinheit.anl_ein
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+
+
+10:	xx.x := 'waiting for Empty Checking';
+	IF 	AllInPos
+	AND Betrieb THEN
+		IF NOT bAllCavitiesEmpty THEN
+			FOR j :=NEST1 TO NEST4  BY  1 DO
+				//f1[feEmptyCheck[i]] :=ixEmptyCheckCavity[i];
+				arrCarrierData[RtNr][RtStNr][i].PartData.Mo20_St055.NotEmpty := TRUE;
+			END_FOR
+			Schritt := 0;
+			bstart:=false;
+			SWI := TRUE;
+		ELSIF   	bAllCavitiesEmpty 
+				AND NOT (  f1[feEmptyCheck[NEST1]] 
+						OR f1[feEmptyCheck[NEST2]]
+						OR f1[feEmptyCheck[NEST3]]
+						OR f1[feEmptyCheck[NEST4]])
+
+		THEN
+			arrCarrierData[RtNr][RtStNr][Nest1].PartDataPcb.Init();
+			arrCarrierData[RtNr][RtStNr][Nest2].PartDataPcb.Init();
+			arrCarrierData[RtNr][RtStNr][Nest3].PartDataPcb.Init();
+			arrCarrierData[RtNr][RtStNr][Nest4].PartDataPcb.Init();
+			Schritt := Schritt + 10;
+			SWI := TRUE;	
+			arrCarrierData[RtNr][RtStNr][Nest1].PartData.Mo20_St055.NotEmpty := FALSE;
+			arrCarrierData[RtNr][RtStNr][Nest2].PartData.Mo20_St055.NotEmpty := FALSE;
+			arrCarrierData[RtNr][RtStNr][Nest3].PartData.Mo20_St055.NotEmpty := FALSE;
+			arrCarrierData[RtNr][RtStNr][Nest4].PartData.Mo20_St055.NotEmpty := FALSE;
+			Schritt := Schritt + 10;
+			SWI := TRUE;
+		END_IF
+		   
+	END_IF
+
+20:	xx.x := 'ionization unit is ON';
+	g_bCentralCleaningRequestOn := TRUE;						//reset request after process
+	IF 	AllInPos
+	AND Betrieb 
+	AND g_bCentralCleaningRunning 
+	THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+		
+30:xx.x := 'Enable valve of Taifun)';
+	g_bCentralCleaningRequestOn := TRUE;						//keep on request while Taifun is running
+	IF	NOT Statein
+		THEN
+			bstart :=FALSE;
+			schritt :=0;
+			SWI :=TRUE;
+		ELSIF AllInPos
+			THEN 
+				IF (_diSpeedMotorPerMinuteMw >=BDE_diTaifunLL_SpeedRpm) AND (_diSpeedMotorPerMinuteMw <=BDE_diTaifunUL_SpeedRpm)
+					THEN 
+						bstart :=FALSE;
+						schritt :=0;
+						SWI :=TRUE;
+					ELSE 
+						(*MV,2551,*** warte bis Taifun (Dr.Escherich) Drehzahl erreicht   
+                          MV,2551,aktuell: **** rpm (von **** bis **** rpm)*)
+						Errors1[feWaitForTaifunAtCorrectSpeed].Txt		:=Statstring;
+						Errors1[feWaitForTaifunAtCorrectSpeed].Txt		:=concat (Errors1[feWaitForTaifunAtCorrectSpeed].Txt,
+																				  RIGHT(concat(' ',DINT_TO_STRING(_diSpeedMotorPerMinuteMw)),4));
+						Errors1[feWaitForTaifunAtCorrectSpeed].Txt		:=concat (Errors1[feWaitForTaifunAtCorrectSpeed].Txt,
+																				  LEFT(concat(DINT_TO_STRING(BDE_diTaifunLL_SpeedRpm),' '),4));
+						Errors1[feWaitForTaifunAtCorrectSpeed].Txt		:=concat (Errors1[feWaitForTaifunAtCorrectSpeed].Txt,
+																				  RIGHT(concat(' ',DINT_TO_STRING(BDE_diTaifunUL_SpeedRpm)),4));
+						f1[feWaitForTaifunAtCorrectSpeed]	:=TRUE;
+				END_IF
+	END_IF
+END_CASE
+
+
+(* ____________________ *)
+(* -- React to Steps -- *)
+IF NOT ManualRun THEN
+	//turn on the ionization unit:= 	(schritt :=20)
+	ValveTaifun.on := 	(schritt =30);
+END_IF
+
+
+(* _____________________________________ *)
+(* -- Stop Roundtable Condition-Based -- *)
+IF FALSE (* <----insert condition for stop here - i.e. zylVertical.y OR NOT zylVertical.a *) THEN 
+	F_ResetFrgRtWithText(TRUE, RtNr, RtStNr, '010MM2 §Vertical§ §not§ §in§ §base-pos.§', io_RtFreigabe);
+END_IF
+
+
+(* ______________________________________ *)
+(* -- Report Station is working on RT  -- *)
+io_RtStarts := CSETBIT32(io_RtStarts, RtStNr, bStart);
+
+
+(* _________________ *)
+(* -- Set outputs -- *)
+
+IF ManualRun THEN (* assign cylinderoutputs .y (by "AND Bedieneinheit.ventile_ok") *)
+	_055_M20_MP1_QM1_MB1         	:=		ValveTaifun.y AND Bedieneinheit.ventile_ok;
+	_055_M20_MP1_QM1_MB2         	:=	not ValveTaifun.y AND Bedieneinheit.ventile_ok;
+ELSE (* assign cylinderoutputs .on (by "AND Bedieneinheit.ventile_ok") *)
+	_055_M20_MP1_QM1_MB1         	:=		ValveTaifun.on AND Bedieneinheit.ventile_ok;
+	_055_M20_MP1_QM1_MB2         	:=	not ValveTaifun.on AND Bedieneinheit.ventile_ok;
+END_IF
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="Mo20_St55_cleaning_and_empty_check">
+      <LineId Id="589" Count="4" />
+      <LineId Id="789" Count="2" />
+      <LineId Id="960" Count="0" />
+      <LineId Id="959" Count="0" />
+      <LineId Id="792" Count="8" />
+      <LineId Id="154" Count="0" />
+      <LineId Id="595" Count="19" />
+      <LineId Id="175" Count="4" />
+      <LineId Id="2953" Count="0" />
+      <LineId Id="180" Count="2" />
+      <LineId Id="615" Count="0" />
+      <LineId Id="184" Count="1" />
+      <LineId Id="2585" Count="0" />
+      <LineId Id="2581" Count="3" />
+      <LineId Id="186" Count="0" />
+      <LineId Id="616" Count="1" />
+      <LineId Id="188" Count="5" />
+      <LineId Id="618" Count="1" />
+      <LineId Id="1504" Count="0" />
+      <LineId Id="1506" Count="5" />
+      <LineId Id="1522" Count="0" />
+      <LineId Id="1513" Count="4" />
+      <LineId Id="1829" Count="0" />
+      <LineId Id="1505" Count="0" />
+      <LineId Id="1503" Count="0" />
+      <LineId Id="210" Count="1" />
+      <LineId Id="2954" Count="22" />
+      <LineId Id="2021" Count="0" />
+      <LineId Id="2027" Count="0" />
+      <LineId Id="1552" Count="0" />
+      <LineId Id="1550" Count="0" />
+      <LineId Id="1559" Count="0" />
+      <LineId Id="1608" Count="0" />
+      <LineId Id="1610" Count="1" />
+      <LineId Id="218" Count="0" />
+      <LineId Id="620" Count="1" />
+      <LineId Id="221" Count="12" />
+      <LineId Id="622" Count="1" />
+      <LineId Id="1138" Count="2" />
+      <LineId Id="239" Count="0" />
+      <LineId Id="241" Count="3" />
+      <LineId Id="627" Count="1" />
+      <LineId Id="247" Count="9" />
+      <LineId Id="2396" Count="1" />
+      <LineId Id="259" Count="2" />
+      <LineId Id="263" Count="6" />
+      <LineId Id="271" Count="3" />
+      <LineId Id="276" Count="1" />
+      <LineId Id="279" Count="7" />
+      <LineId Id="288" Count="0" />
+      <LineId Id="290" Count="0" />
+      <LineId Id="1568" Count="0" />
+      <LineId Id="1619" Count="0" />
+      <LineId Id="1621" Count="0" />
+      <LineId Id="3346" Count="0" />
+      <LineId Id="1622" Count="0" />
+      <LineId Id="1582" Count="0" />
+      <LineId Id="3898" Count="0" />
+      <LineId Id="3897" Count="0" />
+      <LineId Id="1579" Count="0" />
+      <LineId Id="1613" Count="0" />
+      <LineId Id="1616" Count="2" />
+      <LineId Id="1615" Count="0" />
+      <LineId Id="1614" Count="0" />
+      <LineId Id="3161" Count="3" />
+      <LineId Id="1569" Count="0" />
+      <LineId Id="1571" Count="0" />
+      <LineId Id="3347" Count="0" />
+      <LineId Id="3529" Count="2" />
+      <LineId Id="3895" Count="1" />
+      <LineId Id="1570" Count="0" />
+      <LineId Id="291" Count="0" />
+      <LineId Id="293" Count="1" />
+      <LineId Id="1562" Count="1" />
+      <LineId Id="2390" Count="0" />
+      <LineId Id="1565" Count="0" />
+      <LineId Id="1574" Count="1" />
+      <LineId Id="1566" Count="1" />
+      <LineId Id="1560" Count="0" />
+      <LineId Id="295" Count="2" />
+      <LineId Id="2391" Count="0" />
+      <LineId Id="1584" Count="7" />
+      <LineId Id="1594" Count="1" />
+      <LineId Id="1593" Count="0" />
+      <LineId Id="1596" Count="0" />
+      <LineId Id="1631" Count="1" />
+      <LineId Id="1623" Count="7" />
+      <LineId Id="1592" Count="0" />
+      <LineId Id="304" Count="3" />
+      <LineId Id="634" Count="1" />
+      <LineId Id="310" Count="0" />
+      <LineId Id="1583" Count="0" />
+      <LineId Id="312" Count="0" />
+      <LineId Id="314" Count="2" />
+      <LineId Id="1308" Count="4" />
+      <LineId Id="631" Count="0" />
+      <LineId Id="323" Count="3" />
+      <LineId Id="632" Count="0" />
+      <LineId Id="327" Count="0" />
+      <LineId Id="633" Count="0" />
+      <LineId Id="329" Count="2" />
+      <LineId Id="2586" Count="0" />
+      <LineId Id="333" Count="1" />
+      <LineId Id="2587" Count="0" />
+      <LineId Id="336" Count="2" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

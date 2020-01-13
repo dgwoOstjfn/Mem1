@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <DUT Name="E_Flashing_Progress" Id="{17a697db-602a-4877-b8b6-30885606d854}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+{attribute 'strict'}
+TYPE E_Flashing_Progress :
+(
+	IDLE 			:= 0,
+	SEND_START		:= 1,
+	WAIT_RESULT		:= 2,
+	ABORT			:= 3,
+	DONE			:= 4
+);
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

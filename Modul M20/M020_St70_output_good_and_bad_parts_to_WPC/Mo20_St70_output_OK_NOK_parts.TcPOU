@@ -1,0 +1,1650 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.16">
+  <POU Name="Mo20_St70_output_OK_NOK_parts" Id="{67f58402-2a44-4fb2-acb4-b396bcff4baa}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK Mo20_St70_output_OK_NOK_parts
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<DESC>
+=INSERT DESCRIPTION FROM WORKFLOWPLAN=
+</DESC>
+This station was to unloading the finished parts of M20. First the vertical cylinder moves down,then two grippers catch two parts on the fixture of the RT. If the part was good,the horizontal
+cylinder extends out to the loading position. In the same time two turning cylinder will turn 180 degree. Then the vertical cylinder moves down again to release the parts on the WPC. If one
+part was not good, the horizontal cylinder will move to the intermediate position. In the same time, one turning cylinder only turns the good part for 180 degree. The bad part don't need to
+turn. Then release the bad part into the Nok-box. After this step, the horizontal cylinder continue to move to the loading position and release the good part on the WPC. At last all the cylinder
+will be back to the home position.
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-11-06	|	1.00	|	DWO		|	initial version
+
+</CHANGES>
+<VERSION>
+1.00
+</VERSION>
+
+<DEPENDENCIES>
+;
+</DEPENDENCIES>
+
+
+
+ -- overview of areas for steps --
+Steps [000..099]: 	Whatever Block
+Steps [100..199]:	Next Whatever Block
+
+  
+----------------------------------------------------------------------------------------*)
+
+
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	OrderNr: 			INT :=E_TAB_MO_20_ST_70;		(* Nr. Actorder *)
+	MoNr: 				INT:= 020;		(* Module-Number *)
+	StNr: 				INT:= 70;		(* Stationsnumber *)
+	BedienEinheit: 		ZENTR_DATA;		(* Central *)
+	FaultID: 			BYTE := 0;		(* ID for Error Array *)
+	DisplayNr: 			INT := 1;		(* Number of Textdisplay *)
+	MPart: 				INT := 1;		(* Machinepart *)
+	in_InitChainTxt:	STRING(39);		(* String for Step Chain Diagnosis *)
+	in_sKebaKurz:		STRING(gcKebaStKurzLen) := '1234567890'; (* optional - can also be assigned in initialisation paragraph *)
+	in_sKebaBez:		STRING(gcKebaStBezLen) 	:= '11111111112222222222333333333344444444445555555555'; (* optional - can also be assigned in initialisation paragraph *)
+END_VAR
+
+
+(* __________________ *)
+(* -- RT-Interface -- *)
+VAR_INPUT
+	RtNr:				INT := 02;
+	RtStNr:				SINT := 07;
+	RtStartimpuls:		BOOL:=FALSE;	
+END_VAR
+
+VAR_IN_OUT
+	//io_RtRegister:		ARRAY[1..8] OF ARRAY[1..2] OF DataTeil; // info for all parts within roundtable - the part for the station is accessed at [RtStNr]
+	io_RtStarts:		DWORD; // bit array (dword) representing station is working on roundtable (flow based)
+	io_RtFreigabe:		DWORD; // bit array (dword) representing station is giving permission for table to move (state based)
+	io_RtFault:			DWORD; // bit array (dword) representing error at RtStNr of roundtable
+	io_RtWaiting:		DWORD; // bit array (dword) representing waiting at RtStNr of roundtable
+	io_RtWarning:		DWORD; // bit array (dword) representing warning at RtStNr of roundtable
+END_VAR
+
+
+
+
+(* -- WPC1-Interface -- *)
+VAR_INPUT
+	in_iWpcAdress1		:INT:=31;
+END_VAR
+VAR_IN_OUT
+	io_Statinterface1	:FB_StatInfo;
+	io_dwWpcFault1		:DWORD;
+	io_dwWpcWaiting1		:DWORD;
+	io_dwWpcWarning1		:DWORD;
+END_VAR
+
+(* -- WPC2-Interface -- *)
+VAR_INPUT
+	in_iWpcAdress2		:INT:=31;
+END_VAR
+VAR_IN_OUT
+	io_Statinterface2	:FB_StatInfo;
+	io_dwWpcFault2		:DWORD;
+	io_dwWpcWaiting2		:DWORD;
+	io_dwWpcWarning2		:DWORD;
+END_VAR
+(* ====== IF NO FEEDING STATION EXISTS PLEASE DELETE THIS PARAGRAPH AND ELEMINATE SUBSEQUENT ERRORS ====== *)
+
+
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	SWI: 				BOOL := FALSE;	(* Impulse step is changing forward *)
+	SWR:				BOOL := FALSE;	(* Impulse step is changing backwards *)
+	Schritt: 			INT := 0;		(* Current step *)
+	UZ: 				TON;			(* watchtime *)
+	UZ_stau: 			TON;			(* watchtime *)
+	UZ_Gripper: 		TON;			(* watchtime for Grippers *)	
+	Fault: 				BOOL;			(* Stations Error *)
+	Waiting:			BOOL;			(* Station Waiting *)
+	Warning:			BOOL;			(* Station Warning *)
+	Betrieb: 			BOOL;			(* Enable Steps *)
+	StatEin: 			BOOL;			(* Station on *)
+	AllInPos: 			BOOL;			(* all cylinders in position and not actuated manually *)
+	Active:				BOOL;			(* stepchain is marked as active *)
+	Transport:			BOOL;			(* manual transport is enabled *)
+	InitRun:			BOOL;			(* goto homepos is enabled *)
+	CycleRun:			BOOL;			(* mode for single cycle is enabled *)
+	ManualRun:			BOOL;			(* move cylinders manually is enabled *)
+	BackwardsRun:		BOOL;			(* backwards run is enabled *)
+	tonSeitSwi:			TON;			(* time since last change of step *)
+	tonSeitAllInPos:	TON;			(* time since AllInPos has become TRUE *)
+	i:					INT;			(* index-runner for loops *)
+	xx:					FB_StepTracker;	(* auto record steps *)
+	StatString:			STRING(10);		(* '+MM=SS' *)
+	StartCondition:		BOOL;			(* condition for starting station *)
+	bStartRT:				BOOL;			(* station's work on roundtable is running *)
+	NestNr:				INT;			(* number of nest within fixation *)
+	dataHandling		:ARRAY[1..2] OF DataTeil;
+END_VAR
+
+VAR CONSTANT
+	Nest1		:INT:=1;
+	Nest2		:INT:=2;
+END_VAR
+
+(* ___________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrZyl, Nr:= 420, Txt:='=070-BG1 '),				//MV,420,*************** presence Part not present in WPC
+	(* Error 02 *)		(Prio := ErrZyl, Nr:= 420, Txt:='=070-BG2 '),
+	(* Error 03 *)		(Prio := ErrZyl, Nr:= 196, Txt:='=070-BG1 '),				//MV,196,*************** Empty check, Teilereste entfernen
+	(* Error 04 *)		(Prio := ErrZyl, Nr:= 196, Txt:='=070-BG2 '),
+	(* Error 05 *)		(Prio := ErrMeld, Nr:= 244, Txt:='=070-WPC1 '),				//MV,244,*************** nicht frei
+	(* Error 06 *)		(Prio := ErrMeld, Nr:= 244, Txt:='=070-WPC2 '),
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/10            '),
+	(* Error 11 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/11            '),
+	(* Error 12 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/12            '),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13            '),
+	(* Error 14 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/14            '),
+	(* Error 15 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/15            '),
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/16            ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ;
+END_VAR
+
+VAR CONSTANT
+(* -- Error-PresenceCheck -- *)
+fePresenceCheck						: ARRAY[1..2] OF INT :=[1,2];
+
+(* -- Error-WPC not in place-- *)
+fePresenceWPC_front					:INT:=5;
+fePresenceWPC_rear					:INT:=6;
+END_VAR
+
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+
+	(* == Cylinders == *)
+	
+	zyl0_grip1					:ZYL0; (* MM1 *)
+	
+	zyl0_grip2					:ZYL0; (* MM2 *)
+	
+	zyl2_Turning_Nest1			:ZYL2; (* MM3 *)
+	ix_Turning_Nest1A			:BOOL:=FALSE;
+	ix_Turning_Nest1B			:BOOL:=FALSE;
+	
+	zyl2_Turning_Nest2			:ZYL2; (* MM4 *)
+	ix_Turning_Nest2A			:BOOL:=FALSE;
+	ix_Turning_Nest2B			:BOOL:=FALSE;	
+	
+	zyl3_hori_stroke			:ZYL3AC_B; (* MM5 *)
+	ix_hori_strokeA				:BOOL:=FALSE;
+	ix_hori_strokeC				:BOOL:=FALSE;
+	ix_hori_strokeB				:BOOL:=FALSE;		
+	
+	zyl2_interm_hori_stroke		:zyl2; (* MM6 *)
+	ix_interm_hori_strokeA		:BOOL:=FALSE;
+	ix_interm_hori_strokeB		:BOOL:=FALSE;	
+
+	zyl2_vertical_stroke		:zyl2; (* MM7 *)
+	ix_vertical_strokeA			:BOOL:=FALSE;
+	ix_vertical_strokeB			:BOOL:=FALSE;	
+	
+	zyl2_Operate_Carrier		:ZYL2; (* MM8 *)
+	ix_Operate_CarrierA			:BOOL:=FALSE;
+	ix_Operate_CarrierB			:BOOL:=FALSE;	
+	
+	bStartWPC1					:BOOL;					// WPC1 in place 
+	bStartWPC2					:BOOL;					// WPC2 in place 
+	
+	ixPart1inPlace				:BOOL:=FALSE;			//BG1 check presence part workpiece carrier 1
+	ixPart2inPlace				:BOOL:=FALSE;
+	
+	ixPrestopper				:BOOL:=FALSE;
+	
+	(*WPC Positioning Cylinders*)
+	zyl1A_PositioningWorkpiece1 :ZYL1A;
+	ixPositioningWorkpiece1A	:BOOL:=FALSE;
+	
+	zyl1A_PositioningWorkpiece2 :ZYL1A;
+	ixPositioningWorkpiece2A	:BOOL:=FALSE;
+END_VAR
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+		containerBadParts				:FB_ContainerManager;
+END_VAR
+
+(* ____________________ *)
+(* -- LineController -- *)
+VAR
+	LC_Cavity1					:FB_LcStationCommandHandler;
+	LC_Cavity2					:FB_LcStationCommandHandler;
+	CounterResult				:STRING(40);
+	TypeNo						:STRING(40);
+	SerialNo					:STRING(14);
+	DataIndex					:UDINT := 1;
+
+END_VAR
+
+VAR PERSISTENT
+	OutUserData					:ARRAY[1..100] OF BYTE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+(* -- Initialisation -- *)
+IF neustart OR g_bOnlineChange THEN
+	StatString 		:= RIGHT(CONCAT( '000',INT_TO_STRING(StNr) ),3); (* three digits station's prefix is being created automatically for station *)
+	in_InitChainTxt := CONCAT( StatString, ' Output good and bad Parts ' );
+	in_sKebaKurz	:= CONCAT( StatString, ' Output'); // 3+7 digits
+	in_sKebaBez		:= in_InitChainTxt;
+END_IF
+
+
+KebaInitStation(
+	Panelnummer		:= gKebaAktPanel,
+	Aktiv			:= TRUE,
+	Kurzbezeichnung	:= in_sKebaKurz,
+	Bezeichnung		:= in_sKebaBez,
+	ManuellAktiv	:= TRUE,
+	RueckwaertsAktiv:= FALSE,
+	GsAktiv			:= FALSE,
+);
+
+
+(* _______________________________________ *)
+(* -- Entry for Step Sequence Diagnosis -- *)
+InitChain(
+	Step 			:= Schritt,
+	InitialState 	:= TRUE,
+	Fault 			:= Fault,
+	Waiting 		:= Waiting,
+	Warning 		:= Warning,
+	AllInPos 		:= AllInPos,
+	RunOpenDoor 	:= TRUE,
+	Txt 			:= in_InitChainTxt,
+	BedienEinheit 	:= BedienEinheit,
+	Active 			:= Active,
+	Transport 		:= Transport,
+	InitRun 		:= InitRun,
+	CycleRun 		:= CycleRun,
+	ManualRun 		:= ManualRun,
+	BackwardsRun 	:= BackwardsRun);
+InitRun := FALSE;
+
+
+(* _______________ *)
+(* -- Parameter -- *)
+StatEin 	:= ActOrd[MPart].ord_stat[OrderNr].sd_ein;
+
+
+
+(* ____________ *)
+(* -- Inputs -- *)
+ix_Turning_Nest1A		:=_070_M20_MP1_BG3_A;
+ix_Turning_Nest1B		:=_070_M20_MP1_BG3_B;
+
+ix_Turning_Nest2A		:=_070_M20_MP1_BG4_A;
+ix_Turning_Nest2B		:=_070_M20_MP1_BG4_B;
+
+ix_hori_strokeA			:=_070_M20_MP1_BG5_A;
+ix_hori_strokeB			:=_070_M20_MP1_BG5_B;
+ix_hori_strokec			:=_070_M20_MP1_BG5_C;
+
+ix_interm_hori_strokeA	:=_070_M20_MP1_BG6_A;
+ix_interm_hori_strokeB	:=_070_M20_MP1_BG6_B;
+
+ix_vertical_strokeA		:=_070_M20_MP1_BG7_A;
+ix_vertical_strokeB		:=_070_M20_MP1_BG7_B;
+
+ix_Operate_CarrierA		:=_070_M20_MP1_BG8_A;
+ix_Operate_CarrierB		:=_070_M20_MP1_BG8_B;
+
+ixPart1inPlace			:=_070_M20_MP1_BG1;			
+ixPart2inPlace			:=_070_M20_MP1_BG2;
+
+ixPositioningWorkpiece1A:=	_005_M20_MP1_BG4_A;	
+ixPositioningWorkpiece2A:=	_005_M20_MP1_BG6_A;	
+
+ixPrestopper			:= _005_M20_MP1_BG5;
+(* _______________________ *)
+(* -- Timer / Watchdogs -- *)
+UZ( IN:= NOT SWI AND BedienEinheit.grundbed, PT:= T#5S );
+UZ_stau( IN:=_005_M20_MP1_BG2 AND NOT  _005_M30_MP1_BG6, PT:= T#5S );
+tonSeitSwi( IN := NOT SWI AND Bedieneinheit.grundbed, PT := t#30d );
+tonSeitAllInPos( IN := AllInPos AND Bedieneinheit.grundbed, PT := t#30d );
+UZ_Gripper( IN:= NOT SWI AND BedienEinheit.grundbed, PT:= T#0.5S );
+
+(* _______________ *)
+(* -- Cylinders -- *)
+
+zyl0_grip1(
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNrMan		:= 605, 
+	on_vz		:= T#300MS, 
+	off_vz		:= T#300MS, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '1',
+	ID			:= FaultId,
+	Bild		:= picGreifermodul, 
+	BildB		:= picGreifermodulInv,
+ );
+
+zyl0_grip2(
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNrMan		:= 605, 
+	on_vz		:= T#300MS, 
+	off_vz		:= T#300MS, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '2',
+	ID			:= FaultId,
+	Bild		:= picGreifermodul, 
+	BildB		:= picGreifermodulInv,
+ );
+ 
+ zyl2_Turning_Nest1(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_Turning_Nest1A,
+	b			:= ix_Turning_Nest1B,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 202,
+	FNrMan		:= 602,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '3',
+	ID			:= FaultId,
+	Bild		:= picDrehmodul1_0Grad1,
+	BildB		:= picDrehmodul1_180Grad,
+);
+
+ zyl2_Turning_Nest2(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_Turning_Nest2A,
+	b			:= ix_Turning_Nest2B,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 202,
+	FNrMan		:= 602,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '4',
+	ID			:= FaultId,
+	Bild		:= picDrehmodul1_0Grad1,
+	BildB		:= picDrehmodul1_180Grad,
+);
+
+zyl3_hori_stroke(
+	grundbed	:= Bedieneinheit.grundbed, 
+	a			:= ix_hori_strokeA, 
+	b			:= ix_hori_strokeB, 
+	c			:= ix_hori_strokeC, 
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNr			:= 213, 
+	FNrMan		:= 613, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '5',
+	ID			:= FaultId, 
+	Bild		:= picStandard, 
+);
+
+zyl2_interm_hori_stroke(
+	grundbed	:= Bedieneinheit.grundbed, 
+	a			:= ix_interm_hori_strokeA, 
+	b			:= ix_interm_hori_strokeB, 
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNr			:= 214, 
+	FNrMan		:= 614, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '6' ,
+	ID			:= FaultId, 
+	Bild		:= picStandard, 
+	BildB		:= picStandardInv, 
+ );
+
+ zyl2_vertical_stroke(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_vertical_strokeA,
+	b			:= ix_vertical_strokeB,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 211,
+	FNrMan		:= 611,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '7',
+	ID			:= FaultId,
+	Bild		:= picStandard,
+	BildB		:= picStandardInv,
+);
+ 
+zyl2_Operate_Carrier(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_Operate_CarrierA,
+	b			:= ix_Operate_CarrierB,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 245,
+	FNrMan		:= 645,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '8',
+	ID			:= FaultId,
+	Bild		:= picStandard,
+	BildB		:= picStandardInv,
+);
+
+zyl1A_PositioningWorkpiece1(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ixPositioningWorkpiece1A,
+	enable_man	:= (BDE_iLoginLevel >= 6), 
+	on_vz		:= T#50MS, 
+	FNr			:= 244,
+	FNrMan		:= 644,
+	FAnz		:= DisplayNr,
+	StNr		:= '',
+	ZylNr		:= '',
+	txtA		:= '005BG4A        ',
+	txtVentil	:= '005MM4', 
+	ID			:= FaultId,
+	Bild		:= picPfeilNachUnten,
+);
+
+zyl1A_PositioningWorkpiece2(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ixPositioningWorkpiece2A,
+	enable_man	:= (BDE_iLoginLevel >= 6), 
+	on_vz		:= T#50MS, 
+	FNr			:= 244,
+	FNrMan		:= 644,
+	FAnz		:= DisplayNr,
+	StNr		:= '',
+	ZylNr		:= '',
+	txtA		:= '005BG6A       ',
+	txtVentil	:= '005MM6', 
+	ID			:= FaultId,
+	Bild		:= picPfeilNachUnten,
+);
+
+AllInPos :=	zyl0_grip1.pos
+		AND zyl0_grip2.pos
+		AND zyl2_Turning_Nest1.pos
+		AND zyl2_Turning_Nest2.pos
+		AND zyl3_hori_stroke.pos
+		AND zyl2_interm_hori_stroke.pos
+		AND zyl2_vertical_stroke.pos
+		AND zyl2_Operate_Carrier.pos
+		AND zyl1A_PositioningWorkpiece1.pos
+		AND zyl1A_PositioningWorkpiece2.pos;
+
+(* _____________________ *)
+(* -- Line Controller -- *)
+LC_Cavity1.in_Data.OutUserData := ADR(OutUserData);
+LC_Cavity1.in_Data.OutUserData_BufferSize := SIZEOF(OutUserData);
+LC_Cavity1(
+		MoNr				:= MoNr, 
+		StNr				:= StNr, 
+		FaultID				:= FaultID, 
+		DisplayNr			:= DisplayNr, 
+		in_strBMK			:= 'LC', 
+		in_bConnect			:= BedienEinheit.notaus_ok, 
+		in_bEnableLog		:= TRUE, 
+		in_sRemoteHost		:= IP_LineController, 
+		in_uiRemotePort		:= 20701,//INT_TO_UINT(MoNr * 10000 + StNr + Nest1),
+		in_uiStationID		:= 207,
+		in_uiStationSubID	:= 1, 
+		in_bTelegram64kB	:= FALSE, 
+		in_bTypbeschrUebertr:= FALSE
+);
+
+LC_Cavity2.in_Data.OutUserData := ADR(OutUserData);
+LC_Cavity2.in_Data.OutUserData_BufferSize := SIZEOF(OutUserData);
+
+LC_Cavity2(
+		MoNr				:= MoNr, 
+		StNr				:= StNr, 
+		FaultID				:= FaultID, 
+		DisplayNr			:= DisplayNr, 
+		in_strBMK			:= 'LC', 
+		in_bConnect			:= BedienEinheit.notaus_ok, 
+		in_bEnableLog		:= TRUE, 
+		in_sRemoteHost		:= IP_LineController, 
+		in_uiRemotePort		:= 20702,//INT_TO_UINT(MoNr * 10000 + StNr + Nest2),
+		in_uiStationID		:= 207,
+		in_uiStationSubID	:= 2, 
+		in_bTelegram64kB	:= FALSE, 
+		in_bTypbeschrUebertr:= FALSE
+);
+
+
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID, FAnz:= DisplayNr, EF:= Errors1, F:= f1 );
+
+Fault	:= zyl0_grip1.err	(* Error´s of function blocks *)
+		OR zyl0_grip2.err
+		OR zyl2_Turning_Nest1.err
+		OR zyl2_Turning_Nest2.err
+		OR zyl3_hori_stroke.err
+		OR zyl2_interm_hori_stroke.err
+		OR zyl2_vertical_stroke.err
+		OR zyl2_Operate_Carrier.err
+		OR zyl1A_PositioningWorkpiece1.err
+		OR zyl1A_PositioningWorkpiece2.err;
+
+Warning := containerBadParts.out_bWarning;;
+Waiting := FALSE;
+FOR i := 1 TO ErrMaxBits BY 1 DO
+	IF f1[i] THEN
+		IF 		Errors1[i].Prio <= ErrZyl 			THEN Fault := TRUE;
+		ELSIF	Errors1[i].Prio <= ErrEndl 			THEN Waiting := TRUE; f1[i] := FALSE;
+		ELSIF	Errors1[i].Prio <= ErrWechselpos	THEN Warning := TRUE; f1[i] := FALSE; END_IF
+	END_IF
+END_FOR
+
+
+// report Error, Waiting and Warning to cell
+IF Fault 	OR containerBadParts.out_bFaultStopDroppingParts
+	THEN io_RtFault 	:= SETBIT32( io_RtFault,   RtStNr ); END_IF
+IF Waiting 	THEN io_RtWaiting 	:= SETBIT32( io_RtWaiting, RtStNr ); END_IF
+IF Warning	THEN io_RtWarning	:= SETBIT32( io_RtWarning, RtStNr ); END_IF
+
+
+(* Create Errrors / Misc. Errors *)
+
+
+(* __________________________________ *)
+(* -- Station - Allowed to Operate -- *)
+Betrieb := 	Bedieneinheit.betrieb
+		AND NOT Fault
+		AND NOT ManualRun
+		AND BedienEinheit.ventile_ok;
+
+
+(* ____________________ *)
+(* -- Start Station From RT2 -- *)
+IF 	RtStartimpuls THEN
+	StartCondition 
+		:= 	StatEin
+		AND	(arrCarrierData[RtNr][RtStNr][Nest1].PartData.teilestatus > srEmpty
+		OR	arrCarrierData[RtNr][RtStNr][Nest2].PartData.teilestatus > srEmpty);
+					
+	IF StartCondition THEN bStartRT := TRUE; END_IF
+END_IF
+
+(* -- Start Station From WPC1-- *)
+IF io_Statinterface2.bStartImpuls 
+OR io_Statinterface2.bBlindStartimp (* PBAIBN *) 
+THEN
+	StartCondition 
+		:= 	( StatEin OR schritt > 0 )
+		AND	g_WtInfo[io_Statinterface2.iWtNr].dataPart.teilestatus = srEmpty
+		AND (  arrCarrierData[RtNr][1][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][2][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][3][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][4][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][5][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][6][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][7][Nest1].PartData.teilestatus = srGood
+			OR dataHandling[NEST1].teilestatus = srGood
+			OR arrCarrierData[RtNr][1][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][2][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][3][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][4][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][5][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][6][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][7][Nest2].PartData.teilestatus = srGood
+			or dataHandling[NEST2].teilestatus = srGood);
+					
+	IF StartCondition THEN bStartWPC2 := TRUE; END_IF
+END_IF
+
+(* -- Start Station From WPC2-- *)
+IF io_Statinterface1.bStartImpuls OR io_Statinterface1.bBlindStartimp (* PBAIBN *) 
+	THEN
+	// No Station on for first stopper needed because it just depends if second stopper is already started
+	StartCondition 
+		:= g_WtInfo[io_Statinterface1.iWtNr].dataPart.teilestatus = srEmpty
+		AND bStartWPC2
+		AND (  arrCarrierData[RtNr][1][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][2][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][3][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][4][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][5][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][6][Nest1].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][7][Nest1].PartData.teilestatus = srGood
+			OR dataHandling[NEST1].teilestatus = srGood
+			OR arrCarrierData[RtNr][1][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][2][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][3][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][4][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][5][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][6][Nest2].PartData.teilestatus = srGood
+			OR arrCarrierData[RtNr][7][Nest2].PartData.teilestatus = srGood
+			or dataHandling[NEST2].teilestatus = srGood);
+					
+	IF StartCondition THEN bStartWPC1 := TRUE; END_IF
+	
+	// Reset start for second stopper if a WPC with part on it arrives
+	IF g_WtInfo[io_Statinterface1.iWtNr].dataPart.teilestatus >= srBad THEN bStartWPC2 := FALSE; END_IF
+END_IF
+
+
+
+(* _____________________________________________________________ *)
+(* -- Reset WPC Start to prevent a jam infront of station 70  -- *)
+IF (ixPrestopper AND bStartWPC1) OR g_WtInfo[io_Statinterface1.iWtNr].dataPart.teilestatus >= srBad THEN
+	IF Schritt = 0 AND NOT ( arrCarrierData[RtNr][6][Nest1].PartData.teilestatus = srGood OR arrCarrierData[RtNr][6][Nest2].PartData.teilestatus = srGood OR arrCarrierData[RtNr][7][Nest1].PartData.teilestatus = srGood OR arrCarrierData[RtNr][7][Nest2].PartData.teilestatus = srGood)
+	THEN
+		bStartWPC1 := FALSE;
+		bStartWPC2 := FALSE;
+	END_IF
+END_IF
+
+IF UZ_stau.Q AND Schritt= 0 AND NOT bstartrt and bStartWPC1 and bStartWPC2 THEN
+	bStartWPC1 := FALSE;
+	bStartWPC2 := FALSE;
+END_IF
+
+
+(* ________________ *)
+(* -- Step-Chain -- *)
+xx( iStep := Schritt );
+
+(* reset flags *)
+SWI := FALSE;
+
+CASE Schritt OF
+0:	xx.x := 'in basepos. - wait for prework or station´s start';
+	IF  AllInPos
+	AND Statein
+	AND bStartRT
+	AND BedienEinheit.anl_ein
+	//AND LC_Cavity1.hand_comREADY // Handle Ready?
+	//AND LC_Cavity2.hand_comREADY // Handle Ready? 
+	AND Betrieb THEN
+	IF NOT arrCarrierData[RtNr][RtStNr][Nest1].PartData.Mo20_St050.bPCBInsertedOK THEN
+		arrCarrierData[RtNr][RtStNr][Nest1].PartData.teilestatus:=srBad;				
+	END_IF
+	IF NOT arrCarrierData[RtNr][RtStNr][Nest2].PartData.Mo20_St050.bPCBInsertedOK THEN
+		arrCarrierData[RtNr][RtStNr][Nest2].PartData.teilestatus:=srBad;				
+	END_IF
+	IF 	arrCarrierData[RtNr][RtStNr][Nest1].PartData.Mo20_St020.TestPart OR arrCarrierData[RtNr][RtStNr][Nest2].PartData.Mo20_St020.TestPart THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	ELSE
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+	END_IF
+
+5:xx.x := 'Check Serial number in LineController';
+		
+	IF arrCarrierData[RtNr][RtStNr][Nest1].PartData.teilestatus = srempty THEN
+		Schritt := Schritt + 2;
+		SWI := TRUE; 
+	ELSIF NOT LC_Cavity1.out_bBusy THEN
+		LC_Cavity1.in_Data.SerialNo:= arrCarrierData[RtNr][RtStNr][Nest1].PartData.strTeileId;			//+1 by each cycle
+		LC_Cavity1.in_Data.TypeNo  := arrCarrierData[RtNr][RtStNr][Nest1].PartData.strTypeNr;
+		LC_Cavity1.in_Data.AssyLocation := 0;
+		LC_Cavity1.in_Data.OPcode := ENU_LC_OpCode.checkSNRState;
+		LC_Cavity1.in_bSendTelegram := TRUE;
+	END_IF
+
+	IF LC_Cavity1.out_bBusy AND NOT LC_Cavity1.out_bError THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+		LC_Cavity1.in_bSendTelegram := FALSE;
+	END_IF
+
+6: xx.x := 'Wait for result of OP15 = checkSNRState from LC';
+	IF NOT LC_Cavity1.out_bBusy THEN
+		IF NOT LC_Cavity1.out_bError AND LC_Cavity1.out_Data.ACK_Numer = ENU_LC_Ack_Number.ackSucces THEN
+			(* merge parts *)
+			Schritt := Schritt + 1;
+			SWI := TRUE;
+		ELSIF LC_Cavity1.out_Data.ACK_Numer =10 THEN
+			Schritt := Schritt + 1;
+				SWI := TRUE;
+		ELSE
+			IF LC_Cavity1.out_Data.ACK_Numer = ENU_LC_Ack_Number.ackReserved  THEN // TCP/IP-Fehler
+				Schritt := 5;
+				SWI := TRUE;
+			
+			END_IF
+		END_IF
+	END_IF
+
+7:xx.x := 'Check Serial number in LineController';
+	
+	IF arrCarrierData[RtNr][RtStNr][Nest2].PartData.teilestatus = srempty THEN
+		Schritt := Schritt + 3;
+		SWI := TRUE; 
+	ELSIF NOT LC_Cavity2.out_bBusy THEN
+		LC_Cavity2.in_Data.SerialNo:= arrCarrierData[RtNr][RtStNr][Nest2].PartData.strTeileId;			//+1 by each cycle
+		LC_Cavity2.in_Data.TypeNo  := arrCarrierData[RtNr][RtStNr][Nest2].PartData.strTypeNr;
+		LC_Cavity2.in_Data.AssyLocation := 0;
+		LC_Cavity2.in_Data.OPcode := ENU_LC_OpCode.checkSNRState;
+		LC_Cavity2.in_bSendTelegram := TRUE;
+	END_IF
+
+	IF LC_Cavity2.out_bBusy AND NOT LC_Cavity2.out_bError THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+		LC_Cavity2.in_bSendTelegram := FALSE;
+	END_IF
+
+8: xx.x := 'Wait for result of OP15 = checkSNRState from LC';
+	IF NOT LC_Cavity2.out_bBusy THEN
+		IF NOT LC_Cavity2.out_bError AND LC_Cavity2.out_Data.ACK_Numer = ENU_LC_Ack_Number.ackSucces THEN
+			(* merge parts *)
+			Schritt := Schritt + 2;
+			SWI := TRUE;
+		ELSIF LC_Cavity2.out_Data.ACK_Numer =10 THEN
+			Schritt := Schritt + 2;
+			SWI := TRUE;
+		ELSE
+			IF LC_Cavity2.out_Data.ACK_Numer = ENU_LC_Ack_Number.ackReserved  THEN // TCP/IP-Fehler
+				Schritt := 7;
+				SWI := TRUE;
+			
+			END_IF
+		END_IF
+	END_IF				
+	
+10:	xx.x := 'MM7 Vertical -> ON (downwards)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF			
+
+15:	xx.x:= 'MM1 MM2 Gripper 1&2 -> ON (Parts fix) ';
+	IF 	AllInPos
+	AND Betrieb 
+	THEN
+		dataHandling[Nest1] := arrCarrierData[RtNr][RtStNr][Nest1].PartData;
+		dataHandling[Nest2] := arrCarrierData[RtNr][RtStNr][Nest2].PartData;
+		arrCarrierData[RtNr][RtStNr][Nest1].PartData.init();
+		arrCarrierData[RtNr][RtStNr][Nest2].PartData.init();
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF	
+	
+20:	xx.x := 'MM8 Operate Carrier -> ON (Carrier open)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+
+30:	xx.x := 'MM7 Vertical -> OFF (upwards)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		IF ((dataHandling[NEST1].teilestatus = srGood) AND (dataHandling[NEST2].teilestatus = srGood)
+		OR	(dataHandling[NEST1].teilestatus = srGood) AND (dataHandling[NEST2].teilestatus = srEmpty)
+		OR	(dataHandling[NEST1].teilestatus = srEmpty) AND (dataHandling[NEST2].teilestatus = srGood)) THEN
+			Schritt := Schritt + 10;
+			SWI := TRUE;
+		ELSE
+			Schritt := 100;
+			SWI := TRUE;
+		END_IF
+	END_IF	
+
+
+	
+40:	xx.x := 'MM5 P&P hori. Stroke -> ON (advanced to insert position)';
+	xx.xx:= 'MM8 Operate Carrier -> OFF (Carrier closed) ';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF		
+	
+50: xx.x := 'MM3 MM4 P&P rotating cavity  -> ON (insert position)';
+	IF  AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 5;
+		   SWI := TRUE;
+	 END_IF			
+	
+55:	xx.x := 'waiting for InPlaceCheck of WPC';
+	IF 	AllInPos
+	AND Betrieb THEN
+		IF NOT bStartWPC1 
+		OR NOT bStartWPC2
+		THEN 																
+			f1[fePresenceWPC_front]:= NOT bStartWPC1;
+			f1[fePresenceWPC_rear ]:= NOT bStartWPC2;
+		ELSE
+			Schritt := Schritt + 4;
+			SWI := TRUE;
+		END_IF
+	END_IF		
+
+59:	xx.x := '005MM4 Positioning Workpiece fixed';
+	xx.xx := '005MM6 Positioning Workpiece fixed';
+IF 	AllInPos
+AND Betrieb THEN
+	Schritt := Schritt + 1;
+	SWI := TRUE;
+END_IF
+	
+60:	xx.x := 'MM7 Vertical -> ON (downwards)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF		
+	
+70:xx.x := 'MM1 MM2 Gripper 1&2 -> OFF (Parts put)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		g_WtInfo[io_Statinterface2.iWtNr].dataPart := dataHandling[NEST1];		//Data transfer from gripper to WPC		DWOCOM
+		dataHandling[NEST1].Init();												
+		g_WtInfo[io_Statinterface1.iWtNr].dataPart := dataHandling[NEST2];			//DWOCOM
+		dataHandling[NEST2].Init();
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+	
+80:	xx.x := 'MM7 Vertical -> OFF (upwards)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		g_WtInfo[io_Statinterface2.iWtNr].dataPart.StNrLast		:= MoNr*100+StNr;
+		g_WtInfo[io_Statinterface1.iWtNr].dataPart.StNrLast		:= MoNr*100+StNr;
+		IF (NOT ixPart1inPlace) OR (NOT ixPart2inPlace) THEN
+			f1[fePresenceCheck[NEST1]] := NOT ixPart1inPlace;
+			f1[fePresenceCheck[NEST2]] := NOT ixPart2inPlace;				
+			Schritt := Schritt + 1;
+			SWI := TRUE;
+		ELSE
+			Schritt := Schritt + 2;
+			SWI := TRUE;				
+		END_IF
+	END_IF		
+
+81:xx.x := 'Error Reset';
+	IF 	AllInPos
+	AND Betrieb THEN
+		IF  NOT (f1[fePresenceCheck[NEST1]] OR f1[fePresenceCheck[NEST2]])
+		THEN
+			Schritt := Schritt + 1;
+			SWI := TRUE;				
+		END_IF
+	END_IF
+
+(*Step for Line Controller Upload*)	
+82: xx.xx:= 'LineController socket ready';
+	IF	NOT LC_Cavity1.out_bBusy THEN
+
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+83:xx.x := 'Upload result to LC';
+	IF ixPart1inPlace THEN
+		LC_Cavity1.UploadStateAndResultData(	g_WtInfo[io_Statinterface2.iWtNr].dataPart.strTypeNr,
+										g_WtInfo[io_Statinterface2.iWtNr].dataPart.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+	ELSE
+		LC_Cavity1.UploadStateAndResultData(	g_WtInfo[io_Statinterface2.iWtNr].dataPart.strTypeNr,
+										g_WtInfo[io_Statinterface2.iWtNr].dataPart.strTeileId,
+										bcM20_St070_PresenceError_1,(*Fail_Location*)
+										LCID_FAIL_PRESENCE//LCID_FAIL_PRESENCE(*Fail_Type*) 
+									);
+	END_IF
+	IF (LC_Cavity1.comUploadStateAndResultData.bStarted OR LC_Cavity1.comUploadStateAndResultData.bDone) THEN
+		Schritt := Schritt + 3;
+		SWI := TRUE;
+	END_IF;	
+	
+86: xx.xx:= 'LineController socket ready';
+	IF	NOT LC_Cavity2.out_bBusy THEN
+
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+87:xx.x := 'Upload result to LC';
+	IF ixPart2inPlace THEN
+		LC_Cavity2.UploadStateAndResultData(	g_WtInfo[io_Statinterface1.iWtNr].dataPart.strTypeNr,
+										g_WtInfo[io_Statinterface1.iWtNr].dataPart.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+	ELSE
+		LC_Cavity2.UploadStateAndResultData(	g_WtInfo[io_Statinterface1.iWtNr].dataPart.strTypeNr,
+										g_WtInfo[io_Statinterface1.iWtNr].dataPart.strTeileId,
+										bcM20_St070_PresenceError_2,(*Fail_Location*)
+										LCID_FAIL_PRESENCE//LCID_FAIL_PRESENCE(*Fail_Type*)
+									);
+	END_IF
+	IF (LC_Cavity2.comUploadStateAndResultData.bStarted OR LC_Cavity2.comUploadStateAndResultData.bDone) THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF;	
+		
+88: xx.x := '005MM4 Positioning Workpiece not fixed';
+	xx.xx := '005MM6 Positioning Workpiece not fixed';
+	IF NOT ixPart1inPlace THEN g_WtInfo[io_Statinterface2.iWtNr].dataPart.Init(); END_IF
+	IF NOT ixPart2inPlace THEN g_WtInfo[io_Statinterface1.iWtNr].dataPart.Init(); END_IF
+	IF	AllInPos
+	AND	Betrieb THEN
+		bStartWPC1 := FALSE;
+		bStartWPC2 := FALSE;
+		
+		Schritt := Schritt + 2;
+		SWI := TRUE;
+	END_IF
+	
+90:	xx.x := 'MM3 MM4 P&P rotating cavity  -> OFF (extraction position)';
+	xx.xx:= 'MM5 P&P hori. Stroke -> OFF (extraction position)';
+	IF	AllInPos
+	AND	Betrieb THEN			
+		bStartRT := FALSE;
+		Schritt := 0;
+		SWI := TRUE;
+	END_IF
+
+100:xx.x := 'MM6 interm. stop hori. Stroke -> ON (advanced) ';
+	xx.xx:= 'MM8 Operate Carrier -> OFF (Carrier closed) ';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+
+110:xx.x := 'MM5 P&P hori. Stroke -> ON (advanced to dropping position)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+	
+120:xx.x := 'MM1 MM2 Gripper 1/2 -> OFF (Bad Part drop)';
+	IF 	AllInPos
+	AND Betrieb 
+	AND NOT containerBadParts.out_bFaultStopDroppingParts THEN
+		(*reset the datahandling by dropping the bad part*)
+		IF dataHandling[NEST1].teilestatus = srBad THEN
+		dataHandling[NEST1].Init();	
+		END_IF
+		IF dataHandling[NEST2].teilestatus = srBad THEN
+		dataHandling[NEST2].Init();	
+		END_IF
+		containerBadParts.in_bDisplayMessages := TRUE;
+		IF 	(dataHandling[NEST1].teilestatus = srEmpty) AND (dataHandling[NEST2].teilestatus = srEmpty)
+			THEN
+			containerBadParts.in_diPartsToCount := 2;
+			ELSE
+			containerBadParts.in_diPartsToCount := 1;
+		END_IF
+		Schritt := Schritt+5;
+		SWI := TRUE;
+	END_IF		
+
+125:xx.x:= 'MM5 P&P hori. Stroke -> OFF (extraction position)';
+	IF	AllInPos
+	AND	Betrieb THEN			
+		Schritt := Schritt+5;
+		SWI := TRUE;
+	END_IF	
+	
+130:xx.x := 'MM6 interm. stop hori. Stroke -> OFF (retracted)'; 
+	IF	AllInPos
+	AND	Betrieb THEN			
+		IF (dataHandling[NEST1].teilestatus = srEmpty AND dataHandling[NEST2].teilestatus = srEmpty) THEN 		//If both parts are bad, all cyl. go home position after dropping
+			bStartRT := FALSE;
+			Schritt := 0;
+			SWI := TRUE;
+		ELSE 
+			Schritt := 200 ;
+			SWI := TRUE;
+		END_IF
+	END_IF
+
+200:xx.x := 'MM3 MM4 P&P rotating cavity  -> ON (insert position) by Good Part Output ';
+	xx.xx := 'MM5 P&P hori. Stroke -> ON (advanced to insert position)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt+5;
+		SWI := TRUE;
+	END_IF	
+
+205:xx.x := 'waiting for InPlaceCheck of WPC';
+	IF 	AllInPos
+	AND Betrieb THEN
+		IF NOT bStartWPC1 
+		OR NOT bStartWPC2
+		THEN 																
+			f1[fePresenceWPC_front]:= NOT bStartWPC1;
+			f1[fePresenceWPC_rear ]:= NOT bStartWPC2;
+		ELSE
+			Schritt := Schritt + 4;
+			SWI := TRUE;
+		END_IF
+	END_IF
+
+209:	xx.x := '005MM4 Positioning Workpiece fixed';
+	xx.xx := '005MM6 Positioning Workpiece fixed';
+IF 	AllInPos
+AND Betrieb THEN
+	Schritt := Schritt + 1;
+	SWI := TRUE;
+END_IF		
+	
+210:xx.x := 'MM7 Vertical -> ON (downwards)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF		
+	
+220:xx.x := 'MM1 MM2 Gripper 1&2 -> OFF (Parts put)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		g_WtInfo[io_Statinterface2.iWtNr].dataPart := dataHandling[NEST1];		//Data transfer from gripper to WPC  DWOCOM
+		dataHandling[NEST1].Init();												
+		g_WtInfo[io_Statinterface1.iWtNr].dataPart := dataHandling[NEST2];
+		dataHandling[NEST2].Init();
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+	
+230:xx.x := 'MM7 Vertical -> OFF (upwards)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		IF (NOT ixPart1inPlace AND g_WtInfo[io_Statinterface1.iWtNr].dataPart.teilestatus =srGood) OR (NOT ixPart2inPlace AND g_WtInfo[io_Statinterface2.iWtNr].dataPart.teilestatus =srGood) THEN
+			f1[fePresenceCheck[NEST1]] := NOT ixPart1inPlace AND g_WtInfo[io_Statinterface2.iWtNr].dataPart.teilestatus =srGood;
+			f1[fePresenceCheck[NEST2]] := NOT ixPart2inPlace AND g_WtInfo[io_Statinterface1.iWtNr].dataPart.teilestatus =srGood;				
+			Schritt := Schritt + 1;
+			SWI := TRUE;				
+		ELSE
+			Schritt := Schritt + 2;
+			SWI := TRUE;
+		END_IF
+	END_IF
+
+231:xx.x := 'Error Reset';
+	IF 	AllInPos
+	AND Betrieb THEN
+		IF  NOT (f1[fePresenceCheck[NEST1]] OR f1[fePresenceCheck[NEST2]])
+		THEN
+			Schritt := Schritt + 1;
+			SWI := TRUE;				
+		END_IF
+	END_IF	
+
+(*Step for Line Controller Upload*)	
+232: xx.xx:= 'LineController socket ready';
+	IF g_WtInfo[io_Statinterface2.iWtNr].dataPart.teilestatus =srGood THEN
+		IF	NOT LC_Cavity1.out_bBusy THEN
+
+			Schritt := Schritt + 1;
+			SWI := TRUE;
+		END_IF
+	ELSE
+		IF	NOT LC_Cavity2.out_bBusy THEN
+
+			Schritt := Schritt + 1;
+			SWI := TRUE;
+		END_IF
+	END_IF
+233:xx.x := 'Upload result to LC';
+	IF g_WtInfo[io_Statinterface2.iWtNr].dataPart.teilestatus =srGood THEN
+		IF ixPart1inPlace THEN
+			g_WtInfo[io_Statinterface2.iWtNr].dataPart.StNrLast		:= MoNr*100+StNr;
+			LC_Cavity1.UploadStateAndResultData(	g_WtInfo[io_Statinterface2.iWtNr].dataPart.strTypeNr,
+										g_WtInfo[io_Statinterface2.iWtNr].dataPart.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+		ELSE
+			LC_Cavity1.UploadStateAndResultData(	g_WtInfo[io_Statinterface2.iWtNr].dataPart.strTypeNr,
+										g_WtInfo[io_Statinterface2.iWtNr].dataPart.strTeileId,
+										bcM20_St070_PresenceError_1,(*Fail_Location*)
+										LCID_FAIL_PRESENCE//LCID_FAIL_PRESENCE(*Fail_Type*) 
+									);
+		END_IF
+		IF (LC_Cavity1.comUploadStateAndResultData.bStarted OR LC_Cavity1.comUploadStateAndResultData.bDone) THEN
+			Schritt := Schritt + 5;
+			SWI := TRUE;
+		END_IF;	
+	ELSE
+		IF ixPart2inPlace THEN
+		g_WtInfo[io_Statinterface1.iWtNr].dataPart.StNrLast		:= MoNr*100+StNr;
+		LC_Cavity2.UploadStateAndResultData(	g_WtInfo[io_Statinterface1.iWtNr].dataPart.strTypeNr,
+										g_WtInfo[io_Statinterface1.iWtNr].dataPart.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+		ELSE
+			LC_Cavity2.UploadStateAndResultData(	g_WtInfo[io_Statinterface1.iWtNr].dataPart.strTypeNr,
+										g_WtInfo[io_Statinterface1.iWtNr].dataPart.strTeileId,
+										bcM20_St070_PresenceError_2,(*Fail_Location*)
+										LCID_FAIL_PRESENCE//LCID_FAIL_PRESENCE(*Fail_Type*)
+									);
+		END_IF
+		IF (LC_Cavity2.comUploadStateAndResultData.bStarted OR LC_Cavity2.comUploadStateAndResultData.bDone) THEN
+			Schritt := Schritt + 5;
+			SWI := TRUE;
+		END_IF;	
+	END_IF
+	
+238: xx.x := '005MM4 Positioning Workpiece not fixed';
+	xx.xx := '005MM6 Positioning Workpiece not fixed';
+	IF	AllInPos
+	AND	Betrieb THEN
+		bStartWPC1 := FALSE;
+		bStartWPC2 := FALSE;
+		
+		Schritt := Schritt + 2;
+		SWI := TRUE;
+	END_IF		
+			
+240:xx.x := 'MM3 MM4 P&P rotating cavity  -> OFF (extraction position)';
+	xx.xx:= 'MM5 P&P hori. Stroke -> OFF (extraction position)';
+	IF	AllInPos
+	AND	Betrieb THEN			
+		bStartRT := FALSE;
+		Schritt := 0;
+		SWI := TRUE;
+	END_IF
+
+END_CASE
+
+(* ____________________ *)
+(* -- React to Steps -- *)
+IF NOT ManualRun THEN
+			zyl0_grip1.on 			:=  ( (Schritt = 15 AND arrCarrierData[RtNr][RtStNr][Nest1].PartData.teilestatus > srEmpty)
+									OR 	( (Schritt > 15)  AND (Schritt < 70) AND dataHandling[NEST1].teilestatus > srEmpty )
+									OR	( (Schritt >= 100) AND (Schritt < 120) AND dataHandling[NEST1].teilestatus = srBad )
+									OR	( (Schritt >= 100) AND (Schritt < 220) AND dataHandling[NEST1].teilestatus = srGood));
+							
+			zyl0_grip2.on 			:=  ( (Schritt = 15 AND arrCarrierData[RtNr][RtStNr][Nest2].PartData.teilestatus > srEmpty)
+									OR 	( (Schritt > 15)  AND (Schritt < 70) AND dataHandling[NEST2].teilestatus > srEmpty )
+									OR	( (Schritt >= 100) AND (Schritt < 120) AND dataHandling[NEST2].teilestatus = srBad )
+									OR	( (Schritt >= 100) AND (Schritt < 220) AND dataHandling[NEST2].teilestatus = srGood));
+							
+			zyl2_Turning_Nest1.on	:= 	( (Schritt >= 50 AND Schritt < 90)
+									OR	  (Schritt >= 200 AND Schritt < 240) );
+			
+			zyl2_Turning_Nest2.on	:= 	( (Schritt >= 50 AND Schritt < 90)
+									OR	  (Schritt >= 200 AND Schritt < 240) );
+			
+			zyl3_hori_stroke.zwischen :=  (Schritt >= 110) AND (Schritt < 125) ;
+									
+			zyl3_hori_stroke.on		:=  ( (Schritt >= 40 AND Schritt < 90)
+									OR	  (Schritt >= 200 AND Schritt < 240) );   
+			
+			zyl2_interm_hori_stroke.on := (Schritt >= 100) AND (Schritt < 130);
+			
+			zyl2_vertical_stroke.on	:=  ( (Schritt >= 10 AND Schritt < 30) 
+									OR 	  (Schritt >= 60 AND Schritt < 80) 
+									OR 	  (Schritt >= 210 AND Schritt < 230) );
+						
+			zyl2_Operate_Carrier.on	:=  ( (Schritt >= 20) AND (Schritt < 40) );
+			
+			zyl1A_PositioningWorkpiece1.on	:=  ( (Schritt >= 59) AND (Schritt < 88) )
+											 OR ( (Schritt >= 209) AND (Schritt < 238) );
+
+			zyl1A_PositioningWorkpiece2.on	:=  ( (Schritt >= 59) AND (Schritt < 88) )
+										 	 OR ( (Schritt >= 209) AND (Schritt < 238) );													
+END_IF
+
+(* _____________________________ *)
+(* -- Container for Bad Parts -- *)
+containerBadParts(
+	BedienEinheit						:= Bedieneinheit, 
+	FaultID								:= FaultId, 
+	DisplayNr							:= DisplayNr,
+	in_sStatstringname_15_digits		:= '  M20 ST70 P&P', 
+	in_sContainerName_24_digits			:= 'M20 ST70 §Bad Parts§', 
+	in_iBdeButtonResetCounter			:= cM20_PanelKeyF8, 
+	in_iKebaPanelNrResetCounter			:= 1, 
+	in_iKebaPanelButtonNrResetCounter	:= (*F8*)8, 
+	in_diPartsMaxInContainer			:= ActOrd[MPart].ord_stat[E_TAB_MO_20_ST_70].sd_p8, 
+	in_diPartsEarlyWarningInContainer	:= ActOrd[MPart].ord_stat[E_TAB_MO_20_ST_70].sd_p8 * 100/103 (* display early warning 3% before stop*), 
+);
+containerBadParts.in_bDisplayMessages	:= StatEin; 
+
+(* _____________________________________ *)
+(* -- Stop Roundtable Condition-Based -- *)
+IF   	(NOT zyl2_vertical_stroke.a 	OR zyl2_vertical_stroke.b	OR zyl2_vertical_stroke.y) 
+	AND ( zyl3_hori_stroke.a AND NOT zyl3_hori_stroke.b	AND NOT zyl3_hori_stroke.c  AND NOT zyl3_hori_stroke.y)
+THEN 
+	F_ResetFrgRtWithText(TRUE, RtNr, RtStNr, '070MM7 §Vertical§ §not§ §in§ §base-pos.§', io_RtFreigabe);
+END_IF
+
+(* -- Stop WPC Condition-Based -- *)
+IF   	(NOT zyl2_vertical_stroke.a 	OR zyl2_vertical_stroke.b	OR zyl2_vertical_stroke.y) 
+	AND ( zyl3_hori_stroke.b AND NOT zyl3_hori_stroke.a	AND NOT zyl3_hori_stroke.c AND NOT zyl3_hori_stroke.y)
+THEN 
+	io_Statinterface1.bTransportFreigabe := FALSE; 
+	io_Statinterface2.bTransportFreigabe := FALSE; 
+END_IF
+
+(* ______________________________________ *)
+(* -- Report Station is working on RT  -- *)
+io_RtStarts := CSETBIT32(io_RtStarts, RtStNr, bStartRT);
+
+(* _______________________________________ *)
+(* -- Report Station is working on WPC  -- *)
+io_Statinterface1.bLaeuft := bStartWPC1;
+io_Statinterface2.bLaeuft := bStartWPC2;
+
+(* _________________ *)
+(* -- Set outputs -- *)
+
+IF ManualRun THEN (* assign cylinderoutputs .y (by "AND Bedieneinheit.ventile_ok") *)
+	_070_M20_MP1_WZ4_QM1_MB1	:= 		zyl0_grip1.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM1_MB2	:=	NOT	zyl0_grip1.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM2_MB1	:= 		zyl0_grip2.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM2_MB2	:=	NOT	zyl0_grip2.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM3_MB1	:= 		zyl2_Turning_Nest1.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM3_MB2	:=	NOT	zyl2_Turning_Nest1.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM4_MB1	:= 		zyl2_Turning_Nest2.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM4_MB2	:=	NOT	zyl2_Turning_Nest2.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM5_MB1	:= 		zyl3_hori_stroke.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM5_MB2	:=	NOT	zyl3_hori_stroke.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM6_MB1	:= 		zyl2_interm_hori_stroke.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM6_MB2	:=	NOT	zyl2_interm_hori_stroke.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM7_MB1	:= 		zyl2_vertical_stroke.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM7_MB2	:=	NOT	zyl2_vertical_stroke.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ10_QM8_MB1	:= 		zyl2_Operate_Carrier.y	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ10_QM8_MB2	:=	NOT	zyl2_Operate_Carrier.y	AND Bedieneinheit.ventile_ok;
+	
+	_005_M20_MP1_WZ5_QM4_MB1 	:= 		zyl1A_PositioningWorkpiece1.y	AND Bedieneinheit.ventile_ok;
+	_005_M20_MP1_WZ5_QM4_MB2 	:=	NOT	zyl1A_PositioningWorkpiece1.y	AND Bedieneinheit.ventile_ok;
+	
+	_005_M20_MP1_WZ5_QM6_MB1 	:= 		zyl1A_PositioningWorkpiece2.y	AND Bedieneinheit.ventile_ok;
+	_005_M20_MP1_WZ5_QM6_MB2 	:=	NOT	zyl1A_PositioningWorkpiece2.y	AND Bedieneinheit.ventile_ok;
+ELSE (* assign cylinderoutputs .on (by "AND Bedieneinheit.ventile_ok") *)
+	_070_M20_MP1_WZ4_QM1_MB1	:= 		zyl0_grip1.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM1_MB2	:=	NOT	zyl0_grip1.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM2_MB1	:= 		zyl0_grip2.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM2_MB2	:=	NOT	zyl0_grip2.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM3_MB1	:= 		zyl2_Turning_Nest1.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM3_MB2	:=	NOT	zyl2_Turning_Nest1.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM4_MB1	:= 		zyl2_Turning_Nest2.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM4_MB2	:=	NOT	zyl2_Turning_Nest2.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM5_MB1	:= 		(zyl3_hori_stroke.on	or zyl3_hori_stroke.zwischen) AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM5_MB2	:=	NOT	(zyl3_hori_stroke.on	or zyl3_hori_stroke.zwischen) AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM6_MB1	:= 		zyl2_interm_hori_stroke.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM6_MB2	:=	NOT	zyl2_interm_hori_stroke.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM7_MB1	:= 		zyl2_vertical_stroke.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ4_QM7_MB2	:=	NOT	zyl2_vertical_stroke.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ10_QM8_MB1	:= 		zyl2_Operate_Carrier.on	AND Bedieneinheit.ventile_ok;
+	_070_M20_MP1_WZ10_QM8_MB2	:=	NOT	zyl2_Operate_Carrier.on	AND Bedieneinheit.ventile_ok;
+	
+	_005_M20_MP1_WZ5_QM4_MB1 	:= 		zyl1A_PositioningWorkpiece1.on	AND Bedieneinheit.ventile_ok;
+	_005_M20_MP1_WZ5_QM4_MB2 	:=	NOT	zyl1A_PositioningWorkpiece1.on	AND Bedieneinheit.ventile_ok;
+	
+	_005_M20_MP1_WZ5_QM6_MB1 	:= 		zyl1A_PositioningWorkpiece2.on	AND Bedieneinheit.ventile_ok;
+	_005_M20_MP1_WZ5_QM6_MB2 	:=	NOT	zyl1A_PositioningWorkpiece2.on	AND Bedieneinheit.ventile_ok;
+END_IF
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="Mo20_St70_output_OK_NOK_parts">
+      <LineId Id="589" Count="4" />
+      <LineId Id="789" Count="2" />
+      <LineId Id="960" Count="0" />
+      <LineId Id="959" Count="0" />
+      <LineId Id="792" Count="8" />
+      <LineId Id="154" Count="0" />
+      <LineId Id="595" Count="19" />
+      <LineId Id="175" Count="7" />
+      <LineId Id="615" Count="0" />
+      <LineId Id="184" Count="1" />
+      <LineId Id="3051" Count="2" />
+      <LineId Id="186" Count="0" />
+      <LineId Id="3055" Count="1" />
+      <LineId Id="3054" Count="0" />
+      <LineId Id="616" Count="0" />
+      <LineId Id="3058" Count="0" />
+      <LineId Id="3060" Count="0" />
+      <LineId Id="3059" Count="0" />
+      <LineId Id="3062" Count="1" />
+      <LineId Id="3061" Count="0" />
+      <LineId Id="3065" Count="1" />
+      <LineId Id="3064" Count="0" />
+      <LineId Id="3068" Count="0" />
+      <LineId Id="3067" Count="0" />
+      <LineId Id="3069" Count="0" />
+      <LineId Id="6295" Count="0" />
+      <LineId Id="6294" Count="0" />
+      <LineId Id="5803" Count="0" />
+      <LineId Id="6296" Count="0" />
+      <LineId Id="5802" Count="0" />
+      <LineId Id="617" Count="0" />
+      <LineId Id="188" Count="1" />
+      <LineId Id="9569" Count="0" />
+      <LineId Id="190" Count="3" />
+      <LineId Id="618" Count="1" />
+      <LineId Id="1522" Count="0" />
+      <LineId Id="1530" Count="24" />
+      <LineId Id="1584" Count="0" />
+      <LineId Id="1586" Count="12" />
+      <LineId Id="1585" Count="0" />
+      <LineId Id="1599" Count="0" />
+      <LineId Id="1601" Count="12" />
+      <LineId Id="1600" Count="0" />
+      <LineId Id="1620" Count="13" />
+      <LineId Id="1523" Count="0" />
+      <LineId Id="1638" Count="13" />
+      <LineId Id="1637" Count="0" />
+      <LineId Id="1614" Count="0" />
+      <LineId Id="1555" Count="15" />
+      <LineId Id="1572" Count="11" />
+      <LineId Id="1525" Count="0" />
+      <LineId Id="5689" Count="30" />
+      <LineId Id="1526" Count="0" />
+      <LineId Id="209" Count="1" />
+      <LineId Id="1654" Count="4" />
+      <LineId Id="1661" Count="0" />
+      <LineId Id="1653" Count="0" />
+      <LineId Id="5720" Count="1" />
+      <LineId Id="211" Count="0" />
+      <LineId Id="5394" Count="3" />
+      <LineId Id="5399" Count="32" />
+      <LineId Id="212" Count="0" />
+      <LineId Id="217" Count="1" />
+      <LineId Id="620" Count="1" />
+      <LineId Id="221" Count="2" />
+      <LineId Id="1663" Count="2" />
+      <LineId Id="1667" Count="3" />
+      <LineId Id="5722" Count="1" />
+      <LineId Id="1662" Count="0" />
+      <LineId Id="224" Count="9" />
+      <LineId Id="622" Count="1" />
+      <LineId Id="1138" Count="0" />
+      <LineId Id="5132" Count="0" />
+      <LineId Id="1139" Count="1" />
+      <LineId Id="239" Count="0" />
+      <LineId Id="241" Count="3" />
+      <LineId Id="627" Count="1" />
+      <LineId Id="247" Count="10" />
+      <LineId Id="7592" Count="0" />
+      <LineId Id="258" Count="0" />
+      <LineId Id="1978" Count="0" />
+      <LineId Id="260" Count="1" />
+      <LineId Id="263" Count="0" />
+      <LineId Id="2519" Count="0" />
+      <LineId Id="5773" Count="0" />
+      <LineId Id="7882" Count="1" />
+      <LineId Id="5774" Count="0" />
+      <LineId Id="7593" Count="16" />
+      <LineId Id="6833" Count="0" />
+      <LineId Id="5777" Count="1" />
+      <LineId Id="5772" Count="0" />
+      <LineId Id="5770" Count="0" />
+      <LineId Id="2539" Count="0" />
+      <LineId Id="5779" Count="0" />
+      <LineId Id="7881" Count="0" />
+      <LineId Id="5780" Count="2" />
+      <LineId Id="7610" Count="15" />
+      <LineId Id="6832" Count="0" />
+      <LineId Id="5784" Count="4" />
+      <LineId Id="5771" Count="0" />
+      <LineId Id="5789" Count="0" />
+      <LineId Id="2570" Count="0" />
+      <LineId Id="5791" Count="8" />
+      <LineId Id="2571" Count="0" />
+      <LineId Id="9570" Count="0" />
+      <LineId Id="7078" Count="0" />
+      <LineId Id="9573" Count="1" />
+      <LineId Id="9571" Count="1" />
+      <LineId Id="2569" Count="0" />
+      <LineId Id="265" Count="4" />
+      <LineId Id="271" Count="2" />
+      <LineId Id="3733" Count="0" />
+      <LineId Id="3736" Count="0" />
+      <LineId Id="6567" Count="0" />
+      <LineId Id="3737" Count="1" />
+      <LineId Id="5432" Count="1" />
+      <LineId Id="3739" Count="0" />
+      <LineId Id="8128" Count="2" />
+      <LineId Id="8132" Count="1" />
+      <LineId Id="8131" Count="0" />
+      <LineId Id="3740" Count="0" />
+      <LineId Id="9319" Count="0" />
+      <LineId Id="3741" Count="0" />
+      <LineId Id="9320" Count="3" />
+      <LineId Id="3742" Count="0" />
+      <LineId Id="8378" Count="0" />
+      <LineId Id="8380" Count="1" />
+      <LineId Id="9073" Count="1" />
+      <LineId Id="8382" Count="0" />
+      <LineId Id="9072" Count="0" />
+      <LineId Id="8383" Count="18" />
+      <LineId Id="9060" Count="2" />
+      <LineId Id="8402" Count="11" />
+      <LineId Id="9070" Count="1" />
+      <LineId Id="9069" Count="0" />
+      <LineId Id="8414" Count="18" />
+      <LineId Id="9064" Count="1" />
+      <LineId Id="9063" Count="0" />
+      <LineId Id="8433" Count="6" />
+      <LineId Id="3744" Count="0" />
+      <LineId Id="8379" Count="0" />
+      <LineId Id="3745" Count="0" />
+      <LineId Id="3747" Count="4" />
+      <LineId Id="4364" Count="1" />
+      <LineId Id="4367" Count="1" />
+      <LineId Id="4905" Count="0" />
+      <LineId Id="7626" Count="2" />
+      <LineId Id="7347" Count="0" />
+      <LineId Id="4369" Count="1" />
+      <LineId Id="3753" Count="0" />
+      <LineId Id="4371" Count="0" />
+      <LineId Id="3754" Count="2" />
+      <LineId Id="3762" Count="2" />
+      <LineId Id="4143" Count="1" />
+      <LineId Id="4146" Count="2" />
+      <LineId Id="4899" Count="1" />
+      <LineId Id="4149" Count="5" />
+      <LineId Id="4125" Count="0" />
+      <LineId Id="5434" Count="1" />
+      <LineId Id="3765" Count="0" />
+      <LineId Id="4155" Count="5" />
+      <LineId Id="4126" Count="1" />
+      <LineId Id="4161" Count="0" />
+      <LineId Id="4164" Count="3" />
+      <LineId Id="4128" Count="1" />
+      <LineId Id="4168" Count="3" />
+      <LineId Id="4655" Count="0" />
+      <LineId Id="4189" Count="0" />
+      <LineId Id="4172" Count="1" />
+      <LineId Id="4190" Count="0" />
+      <LineId Id="4192" Count="1" />
+      <LineId Id="4188" Count="0" />
+      <LineId Id="4130" Count="0" />
+      <LineId Id="5724" Count="0" />
+      <LineId Id="5726" Count="5" />
+      <LineId Id="5725" Count="0" />
+      <LineId Id="4131" Count="0" />
+      <LineId Id="4195" Count="4" />
+      <LineId Id="4132" Count="0" />
+      <LineId Id="4216" Count="0" />
+      <LineId Id="4201" Count="8" />
+      <LineId Id="4133" Count="1" />
+      <LineId Id="4217" Count="2" />
+      <LineId Id="8807" Count="1" />
+      <LineId Id="6320" Count="2" />
+      <LineId Id="4227" Count="1" />
+      <LineId Id="6568" Count="2" />
+      <LineId Id="4229" Count="1" />
+      <LineId Id="6310" Count="0" />
+      <LineId Id="6312" Count="7" />
+      <LineId Id="6311" Count="0" />
+      <LineId Id="8442" Count="0" />
+      <LineId Id="8444" Count="25" />
+      <LineId Id="8481" Count="24" />
+      <LineId Id="8443" Count="0" />
+      <LineId Id="4231" Count="0" />
+      <LineId Id="5733" Count="2" />
+      <LineId Id="8507" Count="0" />
+      <LineId Id="8506" Count="0" />
+      <LineId Id="5736" Count="5" />
+      <LineId Id="5732" Count="0" />
+      <LineId Id="4232" Count="2" />
+      <LineId Id="4236" Count="6" />
+      <LineId Id="4245" Count="5" />
+      <LineId Id="4243" Count="0" />
+      <LineId Id="4251" Count="1" />
+      <LineId Id="4254" Count="5" />
+      <LineId Id="4261" Count="2" />
+      <LineId Id="5135" Count="0" />
+      <LineId Id="4264" Count="6" />
+      <LineId Id="5140" Count="0" />
+      <LineId Id="5136" Count="1" />
+      <LineId Id="5139" Count="0" />
+      <LineId Id="5141" Count="1" />
+      <LineId Id="5138" Count="0" />
+      <LineId Id="4271" Count="0" />
+      <LineId Id="4896" Count="0" />
+      <LineId Id="4244" Count="0" />
+      <LineId Id="4646" Count="0" />
+      <LineId Id="4648" Count="0" />
+      <LineId Id="4650" Count="1" />
+      <LineId Id="4653" Count="1" />
+      <LineId Id="4279" Count="0" />
+      <LineId Id="4647" Count="0" />
+      <LineId Id="4286" Count="0" />
+      <LineId Id="4289" Count="1" />
+      <LineId Id="4889" Count="1" />
+      <LineId Id="4895" Count="0" />
+      <LineId Id="4891" Count="3" />
+      <LineId Id="4291" Count="0" />
+      <LineId Id="4280" Count="1" />
+      <LineId Id="4294" Count="1" />
+      <LineId Id="4297" Count="3" />
+      <LineId Id="4282" Count="1" />
+      <LineId Id="4301" Count="3" />
+      <LineId Id="4656" Count="0" />
+      <LineId Id="4305" Count="7" />
+      <LineId Id="5747" Count="6" />
+      <LineId Id="5746" Count="0" />
+      <LineId Id="4313" Count="6" />
+      <LineId Id="4327" Count="10" />
+      <LineId Id="4363" Count="0" />
+      <LineId Id="4362" Count="0" />
+      <LineId Id="4361" Count="0" />
+      <LineId Id="4341" Count="3" />
+      <LineId Id="4378" Count="0" />
+      <LineId Id="4349" Count="1" />
+      <LineId Id="6572" Count="1" />
+      <LineId Id="6571" Count="0" />
+      <LineId Id="4351" Count="0" />
+      <LineId Id="6297" Count="0" />
+      <LineId Id="6299" Count="2" />
+      <LineId Id="6305" Count="4" />
+      <LineId Id="5755" Count="0" />
+      <LineId Id="8508" Count="0" />
+      <LineId Id="8511" Count="2" />
+      <LineId Id="8536" Count="0" />
+      <LineId Id="8514" Count="3" />
+      <LineId Id="8537" Count="0" />
+      <LineId Id="8539" Count="3" />
+      <LineId Id="8538" Count="0" />
+      <LineId Id="8518" Count="2" />
+      <LineId Id="8543" Count="0" />
+      <LineId Id="8809" Count="0" />
+      <LineId Id="8521" Count="14" />
+      <LineId Id="8509" Count="1" />
+      <LineId Id="8811" Count="0" />
+      <LineId Id="8546" Count="0" />
+      <LineId Id="8812" Count="0" />
+      <LineId Id="8547" Count="13" />
+      <LineId Id="8544" Count="0" />
+      <LineId Id="6298" Count="0" />
+      <LineId Id="8561" Count="0" />
+      <LineId Id="5756" Count="8" />
+      <LineId Id="5754" Count="0" />
+      <LineId Id="4352" Count="0" />
+      <LineId Id="4354" Count="6" />
+      <LineId Id="4284" Count="1" />
+      <LineId Id="4135" Count="0" />
+      <LineId Id="307" Count="0" />
+      <LineId Id="634" Count="1" />
+      <LineId Id="310" Count="0" />
+      <LineId Id="7629" Count="7" />
+      <LineId Id="2058" Count="0" />
+      <LineId Id="2061" Count="1" />
+      <LineId Id="4374" Count="0" />
+      <LineId Id="2063" Count="1" />
+      <LineId Id="4375" Count="0" />
+      <LineId Id="2065" Count="1" />
+      <LineId Id="2069" Count="1" />
+      <LineId Id="4376" Count="0" />
+      <LineId Id="2071" Count="1" />
+      <LineId Id="2068" Count="0" />
+      <LineId Id="2075" Count="1" />
+      <LineId Id="4377" Count="0" />
+      <LineId Id="2074" Count="0" />
+      <LineId Id="2077" Count="1" />
+      <LineId Id="5765" Count="1" />
+      <LineId Id="5768" Count="0" />
+      <LineId Id="5767" Count="0" />
+      <LineId Id="5769" Count="0" />
+      <LineId Id="314" Count="0" />
+      <LineId Id="5143" Count="14" />
+      <LineId Id="315" Count="1" />
+      <LineId Id="1308" Count="2" />
+      <LineId Id="3317" Count="0" />
+      <LineId Id="3316" Count="0" />
+      <LineId Id="1311" Count="1" />
+      <LineId Id="631" Count="0" />
+      <LineId Id="3902" Count="4" />
+      <LineId Id="4887" Count="0" />
+      <LineId Id="323" Count="0" />
+      <LineId Id="3907" Count="0" />
+      <LineId Id="324" Count="2" />
+      <LineId Id="632" Count="0" />
+      <LineId Id="5742" Count="2" />
+      <LineId Id="327" Count="0" />
+      <LineId Id="5745" Count="0" />
+      <LineId Id="633" Count="0" />
+      <LineId Id="329" Count="4" />
+      <LineId Id="3070" Count="13" />
+      <LineId Id="5679" Count="0" />
+      <LineId Id="5683" Count="0" />
+      <LineId Id="5680" Count="0" />
+      <LineId Id="6048" Count="0" />
+      <LineId Id="5682" Count="0" />
+      <LineId Id="5678" Count="0" />
+      <LineId Id="334" Count="0" />
+      <LineId Id="3084" Count="14" />
+      <LineId Id="335" Count="0" />
+      <LineId Id="5684" Count="0" />
+      <LineId Id="5686" Count="1" />
+      <LineId Id="6049" Count="0" />
+      <LineId Id="5688" Count="0" />
+      <LineId Id="5685" Count="0" />
+      <LineId Id="337" Count="1" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

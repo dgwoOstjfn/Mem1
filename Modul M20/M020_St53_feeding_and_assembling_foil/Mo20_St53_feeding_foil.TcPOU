@@ -1,0 +1,1341 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.16">
+  <POU Name="Mo20_St53_feeding_foil" Id="{797806f7-48d0-4e40-b017-d745d2cc37f8}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK Mo20_St53_feeding_foil
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<DESC>
+=INSERT DESCRIPTION FROM WORKFLOWPLAN=
+</DESC>
+
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-11-15	|	1.00	|	DWO		|	initial version
+
+</CHANGES>
+<VERSION>
+1.00
+</VERSION>
+
+<DEPENDENCIES>
+;
+</DEPENDENCIES>
+
+
+
+ -- overview of areas for steps --
+Steps [000..099]: 	Feed
+Steps [100..199]:	Offer
+  
+----------------------------------------------------------------------------------------*)
+
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	OrderNr: 			INT :=E_TAB_MO_20_ST_53_1;		(* Nr. Actorder *)
+	MoNr: 				INT:= 020;		(* Module-Number *)
+	StNr: 				INT:= 53;		(* Stationsnumber *)
+	BedienEinheit: 		ZENTR_DATA;		(* Central *)
+	FaultID: 			BYTE := 0;		(* ID for Error Array *)
+	DisplayNr: 			INT := 1;		(* Number of Textdisplay *)
+	MPart: 				INT := 1;		(* Machinepart *)
+	in_InitChainTxt:	STRING(39);		(* String for Step Chain Diagnosis *)
+	in_sKebaKurz:		STRING(gcKebaStKurzLen) := '1234567890'; (* optional - can also be assigned in initialisation paragraph *)
+	in_sKebaBez:		STRING(gcKebaStBezLen) 	:= '11111111112222222222333333333344444444445555555555'; (* optional - can also be assigned in initialisation paragraph *)
+END_VAR
+
+
+
+(* _______________________________ *)
+(* -- Handshake with RT-Station -- *)
+VAR_INPUT PERSISTENT
+	in_bEnablePrework		  		:BOOL:=FALSE;
+	in_bFinalPositionIsReady		:BOOL:=FALSE;
+END_VAR
+VAR_OUTPUT PERSISTENT
+	out_bStartControlFinalPosition 	:BOOL:=FALSE;
+END_VAR
+
+
+(* __________________ *)
+(* -- RT-Interface -- *)
+VAR_INPUT
+	RtNr:				INT := 01;
+	RtStNr:				SINT := 03;
+	RtStartimpuls:		BOOL:=FALSE;
+END_VAR
+VAR_IN_OUT
+	io_RtFault				:DWORD; // bit array (dword) representing error at RtStNr of roundtable
+	io_RtWaiting			:DWORD; // bit array (dword) representing waiting at RtStNr of roundtable
+	io_RtWarning			:DWORD; // bit array (dword) representing warning at RtStNr of roundtable
+END_VAR
+
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	SWI: 				BOOL := FALSE;	(* Impulse step is changing forward *)
+	SWR:				BOOL := FALSE;	(* Impulse step is changing backwards *)
+	Schritt: 			INT := 0;		(* Current step *)
+	UZ: 				TON;			(* watchtime *)
+	Fault: 				BOOL;			(* Stations Error *)
+	Waiting:			BOOL;			(* Station Waiting *)
+	Warning:			BOOL;			(* Station Warning *)
+	Betrieb: 			BOOL;			(* Enable Steps *)
+	StatEin: 			BOOL;			(* Station on *)
+	AllInPos: 			BOOL;			(* all cylinders in position and not actuated manually *)
+	Active:				BOOL;			(* stepchain is marked as active *)
+	Transport:			BOOL;			(* manual transport is enabled *)
+	InitRun:			BOOL;			(* goto homepos is enabled *)
+	CycleRun:			BOOL;			(* mode for single cycle is enabled *)
+	ManualRun:			BOOL;			(* move cylinders manually is enabled *)
+	BackwardsRun:		BOOL;			(* backwards run is enabled *)
+	tonSeitSwi:			TON;			(* time since last change of step *)
+	tonSeitAllInPos:	TON;			(* time since AllInPos has become TRUE *)
+	i:					INT;			(* index-runner for loops *)
+	xx:					FB_StepTracker;	(* auto record steps *)
+	StatString:			STRING(10);		(* '+MM=SS' *)
+END_VAR
+
+
+
+(* ___________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrZyl, Nr:= 2405, Txt:='=ST53-BG1 '),		//MV,2405,*************** Folienband,Endposition nicht erreicht
+	(* Error 02 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/02            '),
+	(* Error 03 *)		(Prio := ErrZyl, Nr:= 2403, Txt:='=ST53-BG3'),
+	(* Error 04 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/04            '),
+	(* Error 05 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/05            '),
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/06            '),
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrStau,Nr:=2407, Txt:='=53+P1-TA3'),
+	(* Error 11 *)		(Prio := ErrStau,Nr:=2407, Txt:='=53+P1-TA4'),
+	(* Error 12 *)		(Prio := ErrEndl,Nr:=2410, Txt:=' =530-MA3 / MA4'),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13           '),
+	(* Error 14 *)		(Prio := ErrMeld, Nr:= 2512, Txt:='St53 Feeder '), //*************** waiting for ReadyToTakenover
+	(* Error 15 *)		(Prio := ErrMeld, Nr:= 2513, Txt:='St53 Feeder '), //*************** waiting for Takenover
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/16		   ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ;
+
+END_VAR
+VAR CONSTANT
+	feNoFoilPresence				:INT := 03;
+
+	feFrequencyInvTA3NotReady		:INT:=10;
+	feFrequencyInvTA4NotReady		:INT:=11;
+	feReelNotInAuto					:INT:=12;
+	(*  ... *)
+	feWaitReadyToTakeOver			:INT:=14;
+	feWaitTakenOver					:INT:=15;
+
+END_VAR
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+
+	(* == Cylinders == *)
+	//zyl2_wipeoff_hori_stroke			:ZYL2; (* MM9 *)
+	//ix_wipeoff_hori_strokeA				:BOOL:=FALSE;
+	//ix_wipeoff_hori_strokeB				:BOOL:=FALSE;	
+	
+	zyl2_vertical_stroke				:ZYL2; (* MM10 *)
+	ix_vertical_strokeA					:BOOL:=FALSE;
+	ix_vertical_strokeB					:BOOL:=FALSE;		
+	
+	zyl0_grip							:ZYL0; (* MM11 *)	
+
+	(* == Sensors == *)
+	
+	ixCheckFeed					:BOOL:=FALSE; (* immer0 PAM, not programmed, no function in this case *)
+	ixCheckFoilSpace			:BOOL:=FALSE;
+
+	(* end of foil *)
+	tofCheckPresenceFoil		:TOF;
+	tonCheckPresenceFoil		:TON;
+	bEndOfFoilConveyor			:BOOL:=FALSE;
+
+	rtCheckPresenceFoil			:R_TRIG;
+	ftCheckPresenceFoil			:F_TRIG;
+	bCheckPresenceFoil			:BOOL:=FALSE;
+	
+	(* ----- P1-ST53-TA2 Horizontalhub ------ *)	
+	ix_axX_P_Stop			:BOOL:=FALSE;
+	ix_axX_N_Stop			:BOOL:=FALSE;
+	ix_axX_Ready			:BOOL:=FALSE;
+	ix_axX_STO_aktive		:BOOL:=FALSE;
+	axXID					:USINT:=9;
+	
+	ix_axX_ServoBereit		:BOOL:=FALSE;
+	ix_axX_MotionComplete	:BOOL:=FALSE;
+	qx_axX_ReglerFreigabe	:BOOL:=FALSE;
+	qx_axX_EndstufeFreigabe	:BOOL:=FALSE;
+	
+	(* position *)
+	lrXAxSpeedPositioningFast	:LREAL:=0.0;
+	lrXAxSpeedPositioningSlow	:LREAL:=0.0;
+	lrXAxPosRetracted			:LREAL:=0.0;
+	lrXAxPosPrepositioning		:LREAL:=0.0;
+	lrXAxPosFeeding				:LREAL:=0.0;
+	
+	lrXAxPosPullback			:LREAL:=0.0;
+	
+	SchrittaxJumpBack		:INT:=0;
+	_baxJumpBackDemanded	:BOOL:=FALSE;		//requirment for JumpBack
+	_bStepBackAllowed		:BOOL:=FALSE;
+	_bMoveAxisAllowed		:BOOL:=FALSE;
+	_bAreaHomeToMoveAllowed	:BOOL:=FALSE;
+	_bAreaFeedToMoveAllowed	:BOOL:=FALSE;
+	_bGoFastUntilPrepos		:BOOL:=FALSE;
+	(* --- P1-TA3 frequency inverter rewind  --- *)
+	ixDecoilerReadyTA3			:BOOL:=FALSE;
+	di_BDESetpointRewindTA3		:DINT:=0;
+	iSetpointRewindTA3			:INT :=0;
+
+	(* --- P1-TA4 frequency inverter unwind  --- *)
+	ixDecoilerReadyTA4			:BOOL:=FALSE;
+	di_BDESetpointUnwindTA4		:DINT:=0;
+	iSetpointUnwindTA4			:INT :=0;
+	
+	qxStartUnwindRewindBeltOn   :BOOL:=FALSE;
+	tonStartUnwindRewindBeltOn	:TON;
+	
+	ixReelRunLeftRight			:BOOL:=FALSE;
+	ixReelOperationHandAuto		:BOOL:=FALSE;
+	ixReelRunManual				:BOOL:=FALSE;
+
+	ixCheckPositionFeed			:BOOL:=FALSE;
+	
+	bReelOperationAuto			:BOOL:=TRUE;
+	bReelRunLeft				:BOOL:=TRUE;
+	bReelRunStepByStep			:BOOL:=FALSE;
+	bReleaseReelManual			:BOOL:=FALSE;
+	bReelRunRightManual			:BOOL:=FALSE;	
+	bWithdrawnReleaseFreqInv	:BOOL:=FALSE;
+	
+	bBlendingLow				:BOOL:=FALSE;
+	
+	(* Pullback after TA3/TA4 Restart *)
+	rtRestartFlag			:R_TRIG;
+	bPullbackFlag			:BOOL:=FALSE;
+END_VAR
+
+
+(* __________________________ *)
+(* -- Outputs for hardware -- *)
+VAR PERSISTENT
+	(* frequency inverter P1-TA3 *)
+	qx_iSetpointRewindTA3		 AT %Q*	:INT;		(* velocity of the dispenser *)
+	
+	(* frequency inverter P1-TA4 *)
+	qx_iSetpointUnwindTA4		 AT %Q*	:INT;		(* velocity of the dispenser *)
+END_VAR
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+	(* TA2-ML2-MA2 axis feed cross stroke *)
+	axX							:FB_Achse_mit_Keba;
+END_VAR
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+(* -- Initialisation -- *)
+IF neustart OR g_bOnlineChange THEN
+	StatString 		:= RIGHT(CONCAT( '000',INT_TO_STRING(StNr) ),3); (* three digits station's prefix is being created automatically for station *)
+	in_InitChainTxt := CONCAT( StatString, ' Feeding Foil' );
+	in_sKebaKurz	:= CONCAT( StatString, ' Feed'); // 3+7 digits
+	in_sKebaBez		:= in_InitChainTxt;
+END_IF
+KebaInitStation(
+	Panelnummer		:= gKebaAktPanel,
+	Aktiv			:= TRUE,
+	Kurzbezeichnung	:= in_sKebaKurz,
+	Bezeichnung		:= in_sKebaBez,
+	ManuellAktiv	:= TRUE,
+	RueckwaertsAktiv:= FALSE,
+	GsAktiv			:= FALSE,
+);
+
+
+(* ________________________ *)
+(* == Drive Dimensioning From FCT== *)
+
+(* -- Data ML1-Axis ==53=020TA1 --
+	Controller	CMMP-AS-C2-3A-M3
+	Motor		EMMS-AS-55-M-LS-TM
+	Axis		EGC-80-450-BS-10P-KF-0H-ML-GK
+	Gear Ratio	1 : 1
+
+	Application Environment
+    Total LOAD M					= 11.0 KG
+	
+	Motor Basic
+	Maximum Current	I_max			= 3.52 A
+	Rated Current I_n				= 1.19 A
+	
+	Axis General Limitations
+	max. Velocity v_max				= 400.00 mm/s
+	Shutdown Following Error 		= 20 mm
+	Overspeed Protection I_prot		= 700 mm/s
+	
+	Axis Stop Decelerations
+	Deceleration a_max				= 15.000 m/s²
+	
+	Emergency-Stop-Ramp
+    t_min = v_max / a_max      400 mm/s / 15.000 m/s² =   26.7 ms
+*)
+
+(* -- Data ML2-Axis ==53=020TA2 --
+	Controller	CMMP-AS-C2-3A-M3
+	Motor		EMMS-AS-40-M-LS-TM
+	Axis		EGSL-BS-35-50-8P
+	Gear Ratio	1 : 1
+
+	Application Environment
+    Total LOAD M					= 0.9 KG
+	
+	Motor Basic
+	Maximum Current	I_max			= 1.09 A
+	Rated Current I_n				= 0.63 A
+	
+	Axis General Limitations
+	max. Velocity v_max				= 400.00 mm/s
+	Shutdown Following Error 		= 20 mm
+	Overspeed Protection I_prot		= 700 mm/s
+	
+	Axis Stop Decelerations
+	Deceleration a_max				= 25.000 m/s²
+	
+	Emergency-Stop-Ramp
+    t_min = v_max / a_max      400 mm/s / 25.000 m/s² =   16.0 ms
+*)
+
+
+
+(* _______________________________________ *)
+(* -- Entry for Step Sequence Diagnosis -- *)
+InitChain(
+	Step 			:= Schritt,
+	InitialState 	:= TRUE,
+	Fault 			:= Fault,
+	Waiting 		:= Waiting,
+	Warning 		:= Warning,
+	AllInPos 		:= AllInPos,
+	RunOpenDoor 	:= TRUE,
+	Txt 			:= in_InitChainTxt,
+	BedienEinheit 	:= BedienEinheit,
+	Active 			:= Active,
+	Transport 		:= Transport,
+	InitRun 		:= InitRun,
+	CycleRun 		:= CycleRun,
+	ManualRun 		:= ManualRun,
+	BackwardsRun 	:= BackwardsRun);
+InitRun := FALSE;
+
+(* -- Parameter -- *)
+StatEin 					:= ActOrd[MPart].ord_stat[OrderNr].sd_ein;
+ixReelRunLeftRight			:= ActOrd[MPart].ord_stat[OrderNr].sd_z1;
+ixReelOperationHandAuto		:= ActOrd[MPart].ord_stat[OrderNr].sd_z2;
+ixReelRunManual				:= ActOrd[MPart].ord_stat[OrderNr].sd_z3;
+(* setpoint for frequency inverter *)
+//0Hz  =    0 rpm =  0V	= 0
+//25Hz = 1500 rpm =  5V
+//50Hz = 3000 rpm = 10V = 32767
+(* ----- TA3 ----- *)
+di_BDESetpointRewindTA3	:= (LIMIT(0,(ActOrd[MPart].ord_stat[OrderNr].sd_p7),750));
+iSetpointRewindTA3		:= DINT_TO_INT((di_BDESetpointRewindTA3 * 32767)  / 750   ); 
+//iSetpointRewindTA3		:=0;
+(* ----- TA4 ----- *)
+di_BDESetpointUnwindTA4	:= (LIMIT(0,(ActOrd[MPart].ord_stat[OrderNr].sd_p8),750));
+iSetpointUnwindTA4		:= DINT_TO_INT((di_BDESetpointUnwindTA4  * 32767) / 750   ); 
+//iSetpointUnwindTA4		:=0;
+
+(*MA2 DWOCOM Parameter Input*)
+lrXAxPosRetracted		:=0.0;
+lrXAxPosPrepositioning	:=15.0;					//DWO 22  before reduce to 20on 10/11
+lrXAxPosFeeding			:=28.0;
+lrXAxSpeedPositioningFast:=5.0;				
+lrXAxSpeedPositioningSlow:=1;					//DWO1.5 before reduce to 1.0 on 10/11
+
+lrXAxPosPullback		:=25.0;
+(* ____________ *)
+(* -- Inputs -- *)
+(*Axis Festo Input*)
+ix_axX_P_Stop			:=_053_M20_MP1_BG2_P;
+ix_axX_N_Stop			:=_053_M20_MP1_BG2_N;
+ix_axX_Ready			:=_053_M20_P1_TA2_X1_24;
+ix_axX_MotionComplete	:=_053_M20_P1_TA2_X1_12;
+ix_axX_STO_aktive		:=_053_M20_P1_TA2_X40;
+
+(*Lenze Input*)
+ixDecoilerReadyTA3		:=_053_M20_P1_TA3_X9;
+ixDecoilerReadyTA4		:=_053_M20_P1_TA4_X9;
+
+(*Cylinder Input*)
+
+ix_vertical_strokeA		:=_053_M20_MP1_BG10_A;
+ix_vertical_strokeB		:=_053_M20_MP1_BG10_B;
+
+(*Sensor Input*)
+ixCheckFoilSpace		:=NOT _053_M20_MP1_BG1; 
+ixCheckPositionFeed		:= _053_M20_MP1_BG2;		//DWOCOM
+ixCheckFeed				:=_053_M20_MP1_BG3;
+(* _______________________ *)
+(* -- Timer / Watchdogs -- *)
+UZ( IN:= NOT SWI AND BedienEinheit.grundbed, PT:= T#0.3S );
+tonSeitSwi( IN := NOT SWI AND Bedieneinheit.grundbed, PT := t#30d );
+tonSeitAllInPos( IN := AllInPos AND Bedieneinheit.grundbed, PT := T#30D );
+tonStartUnwindRewindBeltOn(IN := qxStartUnwindRewindBeltOn, PT := T#7S);
+
+(* Unwind / Rewind belt on *)
+//tonWaitUnwindRewindBeltOn (IN := qxUnwindRewindBeltOn, PT := T#1S);
+
+(* _______________ *)
+(* -- Cylinders -- *)
+(*
+zyl2_wipeoff_hori_stroke( 
+	grundbed	:= Bedieneinheit.grundbed, 
+	a			:= ix_wipeoff_hori_strokeA, 
+	b			:= ix_wipeoff_hori_strokeB, 
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNr			:= 220, 
+	FNrMan		:= 620, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '9' ,
+	ID			:= FaultId,  
+ );
+*)	
+zyl2_vertical_stroke( 
+	grundbed	:= Bedieneinheit.grundbed, 
+	a			:= ix_vertical_strokeA, 
+	b			:= ix_vertical_strokeB, 
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNr			:= 201, 
+	FNrMan		:= 601, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '10' ,
+	ID			:= FaultId, 
+ );
+
+zyl0_grip( 
+	enable_man		:= Bedieneinheit.ventile_ok,
+	FNrMan			:= 605,
+	on_vz			:= T#200MS,
+	off_vz			:= T#100MS,
+	FAnz			:= DisplayNr,
+	StNr			:= StatString,
+	ZylNr			:= '11',
+	ID				:= FaultId,
+	Bild			:= picGreifermodul, 
+	BildB			:= picGreifermodulInv,
+);
+AllInPos :=	//zyl2_wipeoff_hori_stroke.pos
+			zyl2_vertical_stroke.pos
+		AND zyl0_grip.pos;
+
+
+
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID, FAnz:= DisplayNr, EF:= Errors1, F:= f1 );
+
+Fault	:= //zyl2_wipeoff_hori_stroke.err    (* Error´s of function blocks *)
+		   zyl2_vertical_stroke.err
+		OR zyl0_grip.err
+		OR axX.out_bFault;
+
+Warning := FALSE;
+Waiting := FALSE;
+FOR i := 1 TO ErrMaxBits BY 1 DO
+	IF f1[i] THEN
+		IF 		Errors1[i].Prio <= ErrZyl 			THEN Fault := TRUE;
+		ELSIF	Errors1[i].Prio <= ErrEndl 			THEN Waiting := TRUE; f1[i] := FALSE;
+		ELSIF	Errors1[i].Prio <= ErrWechselpos	THEN Warning := TRUE; f1[i] := FALSE; END_IF
+	END_IF
+END_FOR
+
+
+// report Error, Waiting and Warning to cell
+IF Fault 	THEN io_RtFault 	:= SETBIT32( io_RtFault, 	 RtStNr ); END_IF
+IF Waiting 	THEN io_RtWaiting 	:= SETBIT32( io_RtWaiting, RtStNr ); END_IF
+IF Warning	THEN io_RtWarning 	:= SETBIT32( io_RtWarning, RtStNr ); END_IF
+
+
+(* Create Errrors / Misc. Errors *)
+(* Check presence foil BG3 *)
+rtCheckPresenceFoil(CLK := ixCheckFeed);
+ftCheckPresenceFoil(CLK := ixCheckFeed);
+
+tofCheckPresenceFoil(IN := rtCheckPresenceFoil.Q OR ftCheckPresenceFoil.Q,
+					 PT := T#1S);
+
+tonCheckPresenceFoil(IN := tofCheckPresenceFoil.Q,PT := T#4S);					 
+bEndOfFoilConveyor := tonCheckPresenceFoil.Q;
+					 
+Errors1[feNoFoilPresence].Prio := ErrFw;
+IF 	StatEin
+AND tonStartUnwindRewindBeltOn.Q
+AND bEndOfFoilConveyor
+AND NOT bReelRunRightManual
+THEN
+	f1[feNoFoilPresence] := Bedieneinheit.anl_ein;
+END_IF
+								
+(* Frequency inverter not ready *)
+Errors1[feFrequencyInvTA3NotReady].Prio := ErrFw;
+IF StatEin
+AND NOT ixDecoilerReadyTA3
+AND Bedieneinheit.notaus_ok
+THEN
+	f1[feFrequencyInvTA3NotReady] := Bedieneinheit.anl_ein;
+END_IF 
+
+Errors1[feFrequencyInvTA4NotReady].Prio := ErrFw;
+IF StatEin
+AND NOT ixDecoilerReadyTA4
+AND Bedieneinheit.notaus_ok
+THEN
+	f1[feFrequencyInvTA4NotReady] := Bedieneinheit.anl_ein;
+END_IF 
+
+(* Motor is not in Automatic mode *)
+f1[feReelNotInAuto] := NOT bReelOperationAuto AND statein;
+
+
+(* Withdrawn Release from booth frequence inverters *)
+bWithdrawnReleaseFreqInv := NOT ixDecoilerReadyTA3
+						 OR NOT ixDecoilerReadyTA4;
+
+(* __________________________________ *)
+(* -- Station - Allowed to Operate -- *)
+Betrieb := 	Bedieneinheit.betrieb
+		AND NOT Fault
+		AND NOT ManualRun
+		AND BedienEinheit.schutz_ok;
+
+rtRestartFlag(CLK := BedienEinheit.schutz_ok );
+IF rtRestartFlag.Q AND (schritt<=20 OR schritt=110) THEN
+		bPullbackFlag:=TRUE;
+END_IF
+		
+		
+(* ________________ *)
+(* -- Step-Chain -- *)
+xx( iStep := Schritt );
+SWI := FALSE;
+_bStepBackAllowed := TRUE;
+out_bStartControlFinalPosition := FALSE;
+
+CASE Schritt OF
+
+(* == Schritte [000..099]: Feed == *)
+0:	xx.x := 'in basepos. - MA1 return step';
+	SchrittAxJumpBack := Schritt;		// In Case of an Error => Return to this step!
+	IF  AllInPos
+	AND BedienEinheit.anl_ein
+	AND Betrieb THEN
+		_bStepBackAllowed	:=FALSE;
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+
+10:	xx.x := 'MA2 Feeder Horizontal -> return step';
+	schrittAxJumpBack		:=schritt;
+	_bStepBackAllowed		:=TRUE;
+	IF 	AllInPos
+	AND Betrieb 
+	AND axX.out_bBereitFuerPos
+	THEN
+		axX.in_lrPosSoll		 		:= lrXAxPosRetracted;
+		axX.in_lrVelocityPercentAuto 	:= 50.0;
+		axX.in_lrVelocityPercentManual 	:=  40.0;
+		axX.in_bStartPosAbsolute:=TRUE;
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF		
+
+20:	xx.x := 'MA2 -> drive to retracted position';
+	axX.in_lrPosSoll		 		:= lrXAxPosRetracted;
+	axX.in_lrVelocityPercentAuto 	:= 10.0;
+	axX.in_lrVelocityPercentManual 	:=  10.0;
+	axX.in_bStartPosAbsolute 		:= TRUE;
+	IF AllInPos
+	AND Betrieb
+	AND Bedieneinheit.anl_ein
+	AND axX.out_bMoveAbsoluteDone
+	AND in_bEnablePrework			(* Prework is enabled from Pick and Place DWOCOM*)
+	AND NOT bPullbackFlag
+	THEN
+		IF NOT ixDecoilerReadyTA3 THEN
+			Errors1[feFrequencyInvTA3NotReady].Prio := ErrEndl;
+		ELSIF NOT ixDecoilerReadyTA4 THEN
+			Errors1[feFrequencyInvTA4NotReady].Prio := ErrEndl;
+		ELSIF tonStartUnwindRewindBeltOn.Q THEN
+			IF bEndOfFoilConveyor AND NOT bReelRunRightManual THEN
+				Errors1[feNoFoilPresence].Prio := ErrEndl;
+			ELSE
+				(* -> MM11 feed grip -> ON (grip foil) *) 
+				Schritt := Schritt + 10;
+				SWI := TRUE;
+			end_if
+		END_IF
+	ELSIF bPullbackFlag THEN
+		Schritt := 200;
+		SWI := TRUE;
+	END_IF
+	
+29:	xx.x := 'step, if axis jump back -> MM6 grip OFF ';
+	_bStepBackAllowed := FALSE;
+	IF AllInPos
+	AND Betrieb
+	THEN
+		_bStepBackAllowed := FALSE;
+
+		Schritt := 0;
+		SWI := TRUE;
+	END_IF
+	
+30:	xx.x := 'MM11 feed grip -> ON (grip foil)';
+	SchrittAxJumpBack := 29;
+	IF AllInPos
+	AND Betrieb
+	THEN
+		(* -> MM5 Vertical -> ON (above) *) 
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+	
+39:	xx.x := 'step, if axis jump back -> MM10 Vertical OFF ';
+	_bStepBackAllowed := FALSE;
+	IF AllInPos
+	AND Betrieb
+	THEN
+		_bStepBackAllowed := FALSE;
+		Schritt := 29;
+		SWI := TRUE;
+	END_IF
+	
+40:	xx.x := 'MM10 Vertical -> ON (above)';
+	SchrittAxJumpBack := 39;
+	IF AllInPos
+	AND Betrieb
+	AND axX.out_bBereitFuerPos
+	THEN
+		bBlendingLow := FALSE;
+		IF _bGoFastUntilPrepos THEN
+			Schritt := Schritt + 5;
+		ELSE	
+			Schritt := Schritt + 10;
+			SWI := TRUE;
+		END_IF
+	END_IF	
+
+45:	xx.x := 'MA2 -> drive to preposition feed';
+	SchrittAxJumpBack := 39;
+	axX.in_bStartPosAbsolute 		:= TRUE;
+	axX.in_lrPosSoll		 		:= lrXAxPosPrepositioning;
+	axX.in_lrVelocityPercentAuto	:= lrXAxSpeedPositioningFast;
+	axX.in_lrVelocityPercentManual	:= lrXAxSpeedPositioningFast / 5;
+	axX.in_BufferMode 				:= MC_BlendingLow;
+
+	IF 	(	axX.out_bMoveAbsoluteActive
+		AND ixCheckPositionFeed
+		)
+	OR 	axX.out_bMoveAbsoluteDone	 
+	THEN
+		IF NOT ixCheckPositionFeed THEN	
+		//IF ixCheckFoilSpace THEN
+			(* -> no label -> go fast *)
+			_bGoFastUntilPrepos := FALSE;
+			Schritt := Schritt + 1;
+			SWI := TRUE;
+	
+		ELSE (* -> label found *)
+			(* -> go slow afterwards *)
+			_bGoFastUntilPrepos := FALSE;
+			bBlendingLow := TRUE;
+			Schritt := 60;
+			SWI := TRUE;
+		END_IF
+	END_IF
+
+46:	SchrittAxJumpBack := 39;
+	IF axX.out_bBereitFuerPos THEN
+		Schritt := 50;
+		SWI := TRUE;
+	END_IF
+
+50:	xx.x := 'MA2 -> go for Sensor (find label)';
+	SchrittAxJumpBack := 39;
+	axX.in_bStartPosAbsolute 		:= TRUE;
+	axX.in_lrPosSoll		 		:= lrXAxPosFeeding;
+	axX.in_lrVelocityPercentAuto	:= lrXAxSpeedPositioningFast;
+	axX.in_lrVelocityPercentManual	:= lrXAxSpeedPositioningFast / 5;
+	axX.in_BufferMode 				:= MC_Aborting;
+	
+(*
+	IF 	(axX.out_lrPosIst >= lrXAxPosPrepositioning)
+	THEN 
+		_bGoFastUntilPrepos := FALSE;
+	END_IF
+*)
+	
+	IF bWithdrawnReleaseFreqInv
+	THEN
+		xx.xx := ', ABORTING Belt Motors have been stopped';
+		(* cancellation step sequence *)
+		(* -> step back *)
+	//	_bGoFastUntilPrepos := FALSE;
+		Schritt := 39;
+		SWI := TRUE; 
+
+	ELSIF axX.out_bMoveAbsoluteDone (* endposition *)
+	THEN
+		(* -> MA1 -> drive to feed position *)
+	//	_bGoFastUntilPrepos := FALSE;
+		Schritt := 39;
+		SWI := TRUE;	
+		
+	ELSIF ixCheckPositionFeed
+	AND NOT _bGoFastUntilPrepos
+	THEN (* Sensor is inside the foil, foil is detected *)
+		xx.xx 	:= ', FOIL FOUND and prepos passed or previous abort, posIst: ';
+		xx.xxx	:= LREAL_TO_STRING( axX.out_lrPosIst );
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+ 	
+60:	xx.x := 'MA1 -> drive to feed position';
+	SchrittAxJumpBack := 39;
+	axX.in_bStartPosAbsolute_2 		:= TRUE;
+
+	IF bBlendingLow THEN
+		axX.in_BufferMode	 		:= MC_BlendingLow;
+	ELSE
+		axX.in_BufferMode	 		:= MC_Aborting;
+	END_IF
+
+	axX.in_lrPosSoll		 		:= lrXAxPosFeeding;
+	axX.in_lrVelocityPercentAuto	:= lrXAxSpeedPositioningSlow;
+	axX.in_lrVelocityPercentManual	:= lrXAxSpeedPositioningSlow; 
+	IF bWithdrawnReleaseFreqInv
+	THEN
+		xx.xx := ', ABORTING Belt Motors have been stopped';
+		(* Abbruch *)
+		(* -> Rücksprung während Vorzug *)
+		_bGoFastUntilPrepos := FALSE;
+		axX.in_bStartPosAbsolute_2 	:= FALSE;
+		axX.in_bStopTransport := TRUE;
+		Schritt := 39;
+		SWI := TRUE;
+		
+	ELSIF (NOT ixCheckPositionFeed AND ixCheckFoilSpace) AND UZ.Q
+	THEN
+		xx.xx := ', FOUND Label -> Ready to offer';	
+	
+		out_bStartControlFinalPosition  := TRUE; 
+
+		(* -> wait for final position is ready *)
+		axX.in_bStartPosAbsolute_2 	:= FALSE;
+		axX.in_bStopTransport := TRUE;
+
+		Schritt := Schritt + 5;
+		SWI := TRUE;	
+		
+	ELSIF axX.out_bMoveAbsolute_2_Done
+	THEN
+		xx.xx := ', no label found, go back begin from start';
+			
+		(* -> to step final position failed accepted *)
+		axX.in_bStartPosAbsolute_2 	:= FALSE;
+		axX.in_bStopTransport := TRUE;
+
+		out_bStartControlFinalPosition  := FALSE; 	
+		_bGoFastUntilPrepos  		:= FALSE;
+		Schritt := 39;
+		SWI := TRUE;
+	END_IF
+
+65:	xx.x := 'wait for final position is ready';
+	out_bStartControlFinalPosition  := TRUE; 
+	IF in_bFinalPositionIsReady 
+	THEN
+		out_bStartControlFinalPosition  := FALSE; 
+		(* ->  MM10 Vertical -> OFF (fix position) *)
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+
+70:	xx.x := 'MM5 Vertical -> OFF (fix position)';
+	IF AllInPos 
+	AND Betrieb
+	AND uz.Q
+	THEN
+		(* ->  MM11 feed grip -> OFF (grip foil open) *)
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+	
+(*
+71:	xx.x := 'MM5 Vertical -> OFF (fix position)';
+	IF AllInPos 
+	AND Betrieb
+	AND (_053_M20_MP1_BG5_B OR _053_M20_MP1_BG6_B OR _053_M20_MP1_BG7_B OR _053_M20_MP1_BG8_B)
+	THEN
+		Schritt := Schritt + 9;
+		SWI := TRUE;
+	END_IF
+*)
+
+	
+80:	xx.x := 'MM6 feed grip -> OFF (grip foil open)';
+	IF AllInPos 
+	AND Betrieb
+	THEN
+		(* -> MA2 return step *)
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+
+90:	xx.x := 'MA1 return step';
+	SchrittAxJumpBack := Schritt;		// In Case of an Error => Return to this step!
+	IF AllInPos
+	AND Betrieb
+	AND axX.out_bBereitFuerPos
+	THEN
+			axX.in_bStartPosAbsolute 		:= TRUE;
+			axX.in_lrPosSoll		 		:= lrXAxPosRetracted;
+			axX.in_lrVelocityPercentAuto 	:= 100.0;
+			axX.in_lrVelocityPercentManual 	:=  80.0;
+			Schritt := Schritt + 20;
+			SWI := TRUE;			
+	END_IF
+
+
+110:	xx.x := 'MA1 -> drive to retracted position';
+	axX.in_bStartPosAbsolute 		:= TRUE;
+	axX.in_lrPosSoll		 		:= lrXAxPosRetracted;
+	axX.in_lrVelocityPercentAuto 	:= 100.0;
+	axX.in_lrVelocityPercentManual 	:=  80.0;
+	IF AllInPos
+	AND Betrieb
+	AND axX.out_bMoveAbsoluteDone
+	AND NOT in_bFinalPositionIsReady			(* Transport control + pick and place is ready DWOCOM *)
+	THEN
+		(* -> go to step, where axis is in retracted position *)
+		(* at next cycle axis can be driving fast *)
+		_bGoFastUntilPrepos := TRUE;
+		Schritt := 20;
+		SWI := TRUE;
+	END_IF
+	
+	
+200:	xx.x := 'MA2 Feeder Horizontal -> pullback step';
+	IF 	AllInPos
+	AND Betrieb 
+	AND axX.out_bBereitFuerPos
+	THEN
+		axX.in_lrPosSoll		 		:= lrXAxPosPullback;
+		axX.in_lrVelocityPercentAuto 	:= 50.0;
+		axX.in_lrVelocityPercentManual 	:=  40.0;
+		axX.in_bStartPosAbsolute:=TRUE;
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF		
+
+210:	xx.x := 'MA2 -> drive to pullback position';
+	axX.in_lrPosSoll		 		:= lrXAxPosPullback;
+	axX.in_lrVelocityPercentAuto 	:= 100.0;
+	axX.in_lrVelocityPercentManual 	:=  80.0;
+	axX.in_bStartPosAbsolute 		:= TRUE;
+	IF AllInPos
+	AND Betrieb
+	AND Bedieneinheit.anl_ein
+	AND axX.out_bMoveAbsoluteDone
+	AND bPullbackFlag
+	THEN
+		IF NOT ixDecoilerReadyTA3 THEN
+			Errors1[feFrequencyInvTA3NotReady].Prio := ErrEndl;
+		ELSIF NOT ixDecoilerReadyTA4 THEN
+			Errors1[feFrequencyInvTA4NotReady].Prio := ErrEndl;
+		ELSIF tonStartUnwindRewindBeltOn.Q THEN
+			IF bEndOfFoilConveyor AND NOT bReelRunRightManual THEN
+				Errors1[feNoFoilPresence].Prio := ErrEndl;
+			ELSE
+				(* -> MM11 feed grip -> ON (grip foil) *) 
+				Schritt := Schritt + 10;
+				SWI := TRUE;
+			end_if
+		END_IF
+	END_IF	
+	
+220:	xx.x := 'MM11 feed grip -> ON (grip foil)';
+	IF AllInPos
+	AND Betrieb
+	THEN
+		(* -> MM5 Vertical -> ON (above) *) 
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+	
+230:	xx.x := 'MM10 Vertical -> ON (above)';
+	IF AllInPos
+	AND Betrieb
+	AND axX.out_bBereitFuerPos
+	THEN
+			Schritt := Schritt + 10;
+			SWI := TRUE;
+	END_IF	
+
+240:	xx.x := 'MA2 Feeder Horizontal -> pullback step';
+	IF 	AllInPos
+	AND Betrieb 
+	AND axX.out_bBereitFuerPos
+	THEN
+		axX.in_lrPosSoll		 		:= lrXAxPosRetracted;
+		axX.in_lrVelocityPercentAuto 	:= 20.0;
+		axX.in_lrVelocityPercentManual 	:=  10.0;
+		axX.in_bStartPosAbsolute:=TRUE;
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF		
+
+250:	xx.x := 'MA2 -> drive to pullback position';
+	axX.in_lrPosSoll		 		:= lrXAxPosRetracted;
+	axX.in_lrVelocityPercentAuto 	:= 30.0;
+	axX.in_lrVelocityPercentManual 	:=  15.0;
+	axX.in_bStartPosAbsolute 		:= TRUE;
+	IF AllInPos
+	AND Betrieb
+	AND Bedieneinheit.anl_ein
+	AND axX.out_bMoveAbsoluteDone
+	THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+
+260:	xx.x := 'MM5 Vertical -> OFF (fix position)';
+	IF AllInPos 
+	AND Betrieb
+	THEN
+		(* ->  MM11 feed grip -> OFF (grip foil open) *)
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+	
+270:	xx.x := 'MM6 feed grip -> OFF (grip foil open)';
+	IF AllInPos 
+	AND Betrieb
+	THEN
+		(* -> MA2 return step *)
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+
+280:	xx.x := 'MA1 return step';
+	IF allinpos
+	AND betrieb
+	THEN
+		IF  (axX.out_lrPosIst>(lrXAxPosRetracted - 0.50))    
+	   	AND (axX.out_lrPosIst<(lrXAxPosRetracted + 0.50))
+		THEN
+			Schritt := 20;
+			SWI := TRUE;
+		ELSE
+			Schritt := 0;
+			SWI := TRUE;
+		END_IF
+		bpullbackflag:=FALSE;
+	END_IF
+			
+
+END_CASE
+
+(* -- Axes Festo Servocontroller -- *)
+axXID	:=cAx_M20_St53_TA2;
+
+(* prevent structure crash*)
+
+_bAreaHomeToMoveAllowed			:=	(axX.out_lrPosIst>(lrXAxPosRetracted - 5.00))     //(Toleranz) value is not right, should be inputted before ST commission
+						 	 AND 	(axX.out_lrPosIst<(lrXAxPosRetracted + 5.00));
+
+_bAreaFeedToMoveAllowed			:=	(axX.out_lrPosIst>(lrXAxPosFeeding - 5.00))   		  //(Toleranz) value is not right, should be inputted before ST commission
+						 	 AND 	(axX.out_lrPosIst<(lrXAxPosFeeding + 5.00));							 
+							 
+_bMoveAxisAllowed			:=	zyl2_vertical_stroke.a  AND NOT  zyl2_vertical_stroke.y;
+								
+
+//Jump back if...
+IF(		Bedieneinheit.notaus_ok = FALSE			// if jumpback is allowed
+	OR	Bedieneinheit.ventile_ok =FALSE
+	OR  Bedieneinheit.grundbed = FALSE
+	OR  Bedieneinheit.schutz_ok = FALSE
+	OR  axX.out_bFault
+	//OR  ( NOT   _bAreaHomeToMoveAllowed
+		//AND (schritt > 30 and schritt <=60))
+	//OR  ( NOT   _bAreaFeedToMoveAllowed
+		//AND (schritt > 70 and schritt <=130))
+	AND _bStepBackAllowed)
+ THEN 
+	_baxJumpBackDemanded	:=TRUE;
+	
+ELSIF _baxJumpBackDemanded						//start the process of jumpback
+	AND Betrieb
+ THEN 
+	_baxJumpBackDemanded	:=FALSE;
+	Schritt :=	SchrittAxJumpBack;
+	SWI	:= TRUE;
+
+END_IF
+(*-------- Axis Input --------*)
+
+axX(
+	BedienEinheit							:= BedienEinheit, 
+	FaultID									:= FaultID, 
+	DisplayNr								:= DisplayNr, 
+	ixP_Stop								:= NOT ix_axX_P_Stop, 
+	ixN_Stop								:= NOT ix_axX_N_Stop, 
+	ixRef									:= false, 									
+	in_strAchsbezeichnung					:= '=053-TA2', 
+	in_strP_Stop							:= '=053-BG2.P', 
+	in_strN_Stop							:= '=053-BG2.N', 
+	in_strRef								:= 'none', 
+	ixBtb									:= Bedieneinheit.grundbed OR ix_axX_Ready, 
+	in_bSvvVersorgt							:= BedienEinheit.hauptstrom_ok, 
+	in_bSvvFreigabe							:= BedienEinheit.grundbed AND BedienEinheit.schutz_ok, 
+	in_bSoftwareEnable						:= StatEin, 
+	//in_lrVelocityPercentAuto				:= 5, 
+	//in_lrVelocityPercentManual				:= 1, 
+	in_lrVelocityGuardOpen					:= 10.0, 
+	in_bSuchrichtungRefPos					:= TRUE,			//DWOCOM
+	Axis									:= g_arrAxisRef [axXID], 
+	bBremse									:= FALSE,
+	in_bRefKeinResetSchleppfehler 			:= TRUE,
+	);	
+
+
+	axX.in_bJogForward			:= FALSE;
+	axX.in_bJogBackwards		:= FALSE;
+	axX.in_bStartPosAbsolute	:= FALSE;
+	axX.in_bStartPosAbsolute_2	:= FALSE;					//normally dont need to use it
+	axX.in_bNotHalt				:= FALSE;
+	axX.in_lrAcceleration		:= 0;
+	axX.in_lrDeceleration		:= 0;
+	axX.in_bStopTransport		:= NOT bedieneinheit.betr_ein;
+	
+	
+	F_InitAchseOhneKoordsysteme(
+		iAchsId						:= axXID, 
+		iActionButtonSlow			:= -1, 
+		iActionButtonFast			:= -1, 
+		strBetriebsmittelname		:= 'M020=St53-TA2', 
+		strKlartextname				:= 'X-Axis', 
+		strEinheitennameWeg			:= 'mm', 
+		strEinheitennameSpeed		:= 'mm/s', 
+		bAbsolutAchse				:= TRUE,  				
+		 );							
+
+
+	//Insert target- and actuel Position in Axis structure
+	g_Achsen[axXID].iAnzKoordsysteme													:=1;
+	g_Achsen[axXID].arr_stCoord[cCoordMachine].strName									:='Position';
+	g_Achsen[axXID].arr_stCoord[cCoordMachine].lrIstPos									:=axX.out_lrPosIst;
+	g_Achsen[axXID].arr_stCoord[cCoordMachine].lrSollPos								:=axX.in_lrPosSoll;
+	
+(* ____________________ *)
+(* -- React to Steps -- *)
+IF NOT ManualRun THEN
+
+	zyl2_vertical_stroke.on 					:= 	( (Schritt >= 40) AND (Schritt < 70) ) OR ( (Schritt >= 230) AND (Schritt < 260) );
+	
+	zyl0_grip.on 								:= 	( (Schritt >= 30) AND (Schritt < 80) ) OR ( (Schritt >= 220) AND (Schritt < 270) );
+
+
+END_IF
+
+(* _________________ *)
+(* -- Set outputs -- *)
+_053_M20_P1_TA2_X1_9		:=axX.qxEnable;
+_053_M20_P1_TA2_X1_21		:=axX.qxEnable;
+
+(* ----- Run the reel with panel ---- *)
+(* Release Manual Mode*)
+bReleaseReelManual := ixDecoilerReadyTA3
+					AND ixDecoilerReadyTA4
+					AND NOT Bedieneinheit.hm_auto;
+								
+								
+IF bReleaseReelManual THEN
+(* Run reel left right *)
+	IF ixReelRunLeftRight THEN
+		bReelRunLeft := FALSE;	(* run right *)
+	ELSE
+		bReelRunLeft := TRUE;  (* run left *)
+	END_IF 
+(* hand / automatic mode *)
+	IF ixReelOperationHandAuto THEN
+		bReelOperationAuto := TRUE;
+	ELSE
+		bReelOperationAuto := FALSE;
+	END_IF 
+ELSE
+	bReelRunLeft 	 := TRUE;		(* when reel is needed, then run right *)
+END_IF 	
+
+(* run reel step by step *)
+bReelRunStepByStep := NOT bReelOperationAuto AND ixReelRunManual;
+
+(* --- P1-TA3 / P1-TA4 Unwind / Rewind Belt system film --- *)
+qxStartUnwindRewindBeltOn := (bReelOperationAuto AND Bedieneinheit.notaus_ok AND ixDecoilerReadyTA3	AND ixDecoilerReadyTA4);
+
+_053_M20_P1_TA3_X3_DI1   := (qxStartUnwindRewindBeltOn OR bReelRunStepByStep) AND StatEin;
+_053_M20_P1_TA4_X3_DI1   := (qxStartUnwindRewindBeltOn OR bReelRunStepByStep) AND StatEin;
+
+
+bReelRunRightManual		:= ((bReelOperationAuto OR bReelRunStepByStep))
+						 AND NOT bReelRunLeft 
+						 AND bReleaseReelManual
+						 AND StatEin;		 	(* decoiler clockwise rotation *)
+
+_053_M20_P1_TA3_X3_DI3   := NOT bReelRunRightManual;
+_053_M20_P1_TA4_X3_DI3   := NOT bReelRunRightManual;
+
+qx_iSetpointRewindTA3	 := iSetpointRewindTA3;		(* analog output *)
+qx_iSetpointUnwindTA4	 := iSetpointUnwindTA4;		(* analog output *)
+
+IF ManualRun THEN (* assign cylinderoutputs .y (by "AND Bedieneinheit.ventile_ok") *)
+	//_053_M20_MP1_WZ9_QM9_MB1         	:=		zyl2_wipeoff_hori_stroke.y AND Bedieneinheit.ventile_ok;
+	//_053_M20_MP1_WZ9_QM9_MB2         	:=	NOT zyl2_wipeoff_hori_stroke.y AND Bedieneinheit.ventile_ok;
+	_053_M20_MP1_WZ9_QM10_MB1         	:=		zyl2_vertical_stroke.y AND Bedieneinheit.ventile_ok;
+	_053_M20_MP1_WZ9_QM10_MB2         	:=	NOT zyl2_vertical_stroke.y AND Bedieneinheit.ventile_ok;
+	_053_M20_MP1_WZ9_QM11_MB1         	:=		zyl0_grip.y AND Bedieneinheit.ventile_ok;
+	_053_M20_MP1_WZ9_QM11_MB2         	:=	NOT zyl0_grip.y AND Bedieneinheit.ventile_ok;
+ELSE (* assign cylinderoutputs .on (by "AND Bedieneinheit.ventile_ok") *)
+	//_053_M20_MP1_WZ9_QM9_MB1         	:=		zyl2_wipeoff_hori_stroke.on AND Bedieneinheit.ventile_ok;
+	//_053_M20_MP1_WZ9_QM9_MB2         	:=	NOT zyl2_wipeoff_hori_stroke.on AND Bedieneinheit.ventile_ok;
+	_053_M20_MP1_WZ9_QM10_MB1         	:=		zyl2_vertical_stroke.on AND Bedieneinheit.ventile_ok;
+	_053_M20_MP1_WZ9_QM10_MB2         	:=	NOT zyl2_vertical_stroke.on AND Bedieneinheit.ventile_ok;
+	_053_M20_MP1_WZ9_QM11_MB1         	:=		zyl0_grip.on AND Bedieneinheit.ventile_ok;
+	_053_M20_MP1_WZ9_QM11_MB2         	:=	NOT zyl0_grip.on AND Bedieneinheit.ventile_ok;
+END_IF
+]]></ST>
+    </Implementation>
+    <LineIds Name="Mo20_St53_feeding_foil">
+      <LineId Id="159" Count="4" />
+      <LineId Id="776" Count="1" />
+      <LineId Id="164" Count="0" />
+      <LineId Id="762" Count="2" />
+      <LineId Id="778" Count="1" />
+      <LineId Id="767" Count="3" />
+      <LineId Id="4135" Count="1" />
+      <LineId Id="4891" Count="26" />
+      <LineId Id="4919" Count="23" />
+      <LineId Id="4918" Count="0" />
+      <LineId Id="166" Count="0" />
+      <LineId Id="4185" Count="0" />
+      <LineId Id="4184" Count="0" />
+      <LineId Id="167" Count="18" />
+      <LineId Id="5204" Count="0" />
+      <LineId Id="5206" Count="1" />
+      <LineId Id="5938" Count="1" />
+      <LineId Id="5213" Count="10" />
+      <LineId Id="5205" Count="0" />
+      <LineId Id="3849" Count="0" />
+      <LineId Id="6707" Count="4" />
+      <LineId Id="7760" Count="0" />
+      <LineId Id="5224" Count="0" />
+      <LineId Id="8277" Count="0" />
+      <LineId Id="8276" Count="0" />
+      <LineId Id="3851" Count="7" />
+      <LineId Id="3879" Count="0" />
+      <LineId Id="3866" Count="1" />
+      <LineId Id="3880" Count="1" />
+      <LineId Id="3868" Count="0" />
+      <LineId Id="3871" Count="3" />
+      <LineId Id="186" Count="0" />
+      <LineId Id="5640" Count="0" />
+      <LineId Id="5639" Count="0" />
+      <LineId Id="3878" Count="0" />
+      <LineId Id="197" Count="4" />
+      <LineId Id="5278" Count="0" />
+      <LineId Id="202" Count="0" />
+      <LineId Id="3199" Count="0" />
+      <LineId Id="203" Count="0" />
+      <LineId Id="3200" Count="0" />
+      <LineId Id="204" Count="1" />
+      <LineId Id="1635" Count="0" />
+      <LineId Id="1561" Count="3" />
+      <LineId Id="1566" Count="2" />
+      <LineId Id="1638" Count="0" />
+      <LineId Id="1570" Count="1" />
+      <LineId Id="1575" Count="0" />
+      <LineId Id="1559" Count="0" />
+      <LineId Id="1558" Count="0" />
+      <LineId Id="1688" Count="4" />
+      <LineId Id="1694" Count="0" />
+      <LineId Id="2958" Count="0" />
+      <LineId Id="1695" Count="3" />
+      <LineId Id="1686" Count="1" />
+      <LineId Id="206" Count="8" />
+      <LineId Id="5890" Count="0" />
+      <LineId Id="216" Count="2" />
+      <LineId Id="1730" Count="1" />
+      <LineId Id="219" Count="6" />
+      <LineId Id="1734" Count="2" />
+      <LineId Id="6438" Count="0" />
+      <LineId Id="1738" Count="0" />
+      <LineId Id="227" Count="11" />
+      <LineId Id="1133" Count="2" />
+      <LineId Id="242" Count="2" />
+      <LineId Id="5279" Count="1" />
+      <LineId Id="8007" Count="0" />
+      <LineId Id="5282" Count="13" />
+      <LineId Id="1314" Count="0" />
+      <LineId Id="1312" Count="0" />
+      <LineId Id="5296" Count="14" />
+      <LineId Id="247" Count="1" />
+      <LineId Id="5311" Count="5" />
+      <LineId Id="249" Count="1" />
+      <LineId Id="269" Count="5" />
+      <LineId Id="276" Count="0" />
+      <LineId Id="8256" Count="0" />
+      <LineId Id="277" Count="0" />
+      <LineId Id="8258" Count="0" />
+      <LineId Id="8260" Count="1" />
+      <LineId Id="8257" Count="0" />
+      <LineId Id="597" Count="1" />
+      <LineId Id="280" Count="1" />
+      <LineId Id="5318" Count="0" />
+      <LineId Id="5317" Count="0" />
+      <LineId Id="284" Count="3" />
+      <LineId Id="5326" Count="1" />
+      <LineId Id="6686" Count="0" />
+      <LineId Id="6688" Count="4" />
+      <LineId Id="5343" Count="2" />
+      <LineId Id="6693" Count="5" />
+      <LineId Id="6705" Count="1" />
+      <LineId Id="6701" Count="0" />
+      <LineId Id="6959" Count="0" />
+      <LineId Id="6703" Count="1" />
+      <LineId Id="5358" Count="2" />
+      <LineId Id="5362" Count="2" />
+      <LineId Id="6712" Count="0" />
+      <LineId Id="5365" Count="5" />
+      <LineId Id="8263" Count="0" />
+      <LineId Id="5371" Count="10" />
+      <LineId Id="7017" Count="0" />
+      <LineId Id="7015" Count="0" />
+      <LineId Id="8265" Count="2" />
+      <LineId Id="5384" Count="61" />
+      <LineId Id="8846" Count="0" />
+      <LineId Id="5446" Count="123" />
+      <LineId Id="8845" Count="0" />
+      <LineId Id="5570" Count="4" />
+      <LineId Id="9121" Count="0" />
+      <LineId Id="9098" Count="0" />
+      <LineId Id="9105" Count="2" />
+      <LineId Id="9113" Count="0" />
+      <LineId Id="9109" Count="0" />
+      <LineId Id="9111" Count="1" />
+      <LineId Id="9099" Count="0" />
+      <LineId Id="9102" Count="0" />
+      <LineId Id="9104" Count="0" />
+      <LineId Id="5575" Count="15" />
+      <LineId Id="7511" Count="2" />
+      <LineId Id="5591" Count="2" />
+      <LineId Id="5601" Count="0" />
+      <LineId Id="5616" Count="17" />
+      <LineId Id="8268" Count="1" />
+      <LineId Id="8280" Count="0" />
+      <LineId Id="8283" Count="20" />
+      <LineId Id="8305" Count="14" />
+      <LineId Id="8270" Count="1" />
+      <LineId Id="8323" Count="0" />
+      <LineId Id="8325" Count="7" />
+      <LineId Id="8343" Count="0" />
+      <LineId Id="8345" Count="3" />
+      <LineId Id="8353" Count="1" />
+      <LineId Id="8356" Count="1" />
+      <LineId Id="8541" Count="21" />
+      <LineId Id="8564" Count="0" />
+      <LineId Id="8574" Count="1" />
+      <LineId Id="8385" Count="0" />
+      <LineId Id="8492" Count="19" />
+      <LineId Id="8274" Count="0" />
+      <LineId Id="8578" Count="0" />
+      <LineId Id="8584" Count="1" />
+      <LineId Id="8581" Count="0" />
+      <LineId Id="8586" Count="0" />
+      <LineId Id="8579" Count="0" />
+      <LineId Id="8587" Count="0" />
+      <LineId Id="8583" Count="0" />
+      <LineId Id="8588" Count="0" />
+      <LineId Id="8590" Count="2" />
+      <LineId Id="8582" Count="0" />
+      <LineId Id="8272" Count="0" />
+      <LineId Id="8275" Count="0" />
+      <LineId Id="364" Count="0" />
+      <LineId Id="3348" Count="0" />
+      <LineId Id="5941" Count="0" />
+      <LineId Id="3349" Count="5" />
+      <LineId Id="3378" Count="0" />
+      <LineId Id="3380" Count="0" />
+      <LineId Id="3355" Count="0" />
+      <LineId Id="3379" Count="0" />
+      <LineId Id="3356" Count="0" />
+      <LineId Id="3381" Count="0" />
+      <LineId Id="3358" Count="8" />
+      <LineId Id="3384" Count="1" />
+      <LineId Id="3367" Count="10" />
+      <LineId Id="365" Count="0" />
+      <LineId Id="3003" Count="11" />
+      <LineId Id="7264" Count="0" />
+      <LineId Id="3015" Count="6" />
+      <LineId Id="6983" Count="2" />
+      <LineId Id="3022" Count="1" />
+      <LineId Id="6960" Count="0" />
+      <LineId Id="3025" Count="20" />
+      <LineId Id="7008" Count="5" />
+      <LineId Id="3169" Count="0" />
+      <LineId Id="3129" Count="0" />
+      <LineId Id="368" Count="2" />
+      <LineId Id="2091" Count="0" />
+      <LineId Id="2105" Count="0" />
+      <LineId Id="2108" Count="1" />
+      <LineId Id="2112" Count="0" />
+      <LineId Id="2092" Count="0" />
+      <LineId Id="373" Count="0" />
+      <LineId Id="376" Count="0" />
+      <LineId Id="414" Count="1" />
+      <LineId Id="3882" Count="0" />
+      <LineId Id="418" Count="0" />
+      <LineId Id="5893" Count="0" />
+      <LineId Id="5895" Count="42" />
+      <LineId Id="5894" Count="0" />
+      <LineId Id="420" Count="2" />
+      <LineId Id="3896" Count="4" />
+      <LineId Id="423" Count="0" />
+      <LineId Id="3901" Count="4" />
+      <LineId Id="424" Count="1" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

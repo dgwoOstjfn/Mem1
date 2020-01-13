@@ -1,0 +1,262 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="M20_WPC" Id="{ff51dc2f-909c-4bff-8de3-9ba81c96b3c2}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK M20_WPC
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-12-18	|	1.00	|	PBA		|	initial version
+</CHANGES>
+*)
+
+
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	MoNr: 					INT := 1;			(* module number *)
+	BedienEinheit:			ZENTR_DATA;			(* central *)
+	DisplayNr: 				INT := 1;			(* number of textdisplay *)
+END_VAR
+VAR_IN_OUT
+	io_dwWpcFault:			DWORD;				// bit array (dword) representing error at wpc-location
+	io_dwWpcWaiting:		DWORD;				// bit array (dword) representing waiting at wpc-location
+	io_dwWpcWarning:		DWORD;				// bit array (dword) representing warning at wpc-location
+END_VAR
+
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+	WPC_PLACE_ID					:INT:= cWpcPlaceNone; (* only temporary used as alias for workpiececarrier place identification *)
+END_VAR
+
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+	Wpc_St_070_1					:WT_Baustein;		(* is managing first and main stopper plus id-system at main stopper *) 
+	Wpc_St_070_2					:WT_Baustein;		(* is managing first and main stopper plus id-system at main stopper *) 
+	Wpc_St_090						:WT_Baustein; 		(* stopper before curve for cleaning wpc *) 
+	Rfid_St_070_1					:FB_IfmDte101; 		(* IFM identsystem to read and write data for WPC's at st.170 *)
+	rtRfid_St_70_1_WriteWpcId		:R_TRIG;			(* rising trigger for writing workpiececarrier identification *)
+	Rfid_St_070_2					:FB_IfmDte101; 		(* IFM identsystem to read and write data for WPC's at st.170 *)
+	rtRfid_St_70_2_WriteWpcId		:R_TRIG;			(* rising trigger for writing workpiececarrier identification *)
+END_VAR
+
+
+
+
+
+
+
+
+
+
+
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ___________________________________ *)
+(* Call Stopper at Station 90 *)
+WPC_PLACE_ID := cWpcPlaceM20_AtSt090;
+Wpc_St_090(
+	MoNr						:= MoNr, 
+	BedienEinheit				:= Bedieneinheit, 
+	FaultID						:= FaultID_Wt_M20_St090, 
+	DisplayNr					:= DisplayNr, 
+	ioStat						:= g_arrStatInfo[	WPC_PLACE_ID],  //no identification 
+	ioHere						:= g_arrWtPlace[	WPC_PLACE_ID], 
+	ioPrev						:= g_arrWtPlace[	cWpcPlaceNone], // not chained with stopper before that one 
+	ioNext						:= g_arrWtPlace[	cWpcPlaceNone], // not chained with stopper after that one
+
+	io_dwWpcFault				:= io_dwWpcFault,
+	io_dwWpcWaiting				:= io_dwWpcWaiting,
+	io_dwWpcWarning				:= io_dwWpcWarning,
+	
+	in_bIsOnlyMainStopper		:= TRUE,
+	// ixVorstopper				:= , not needed 
+	// strVorstopper			:= , not needed 
+	ixMainstopper				:=     _005_M20_MP1_BG1, 
+	sSensorMainstopper			:= '  =005++M20-BG1', 
+	ixJamAfterStat				:=     _005_M20_MP1_BG2, 
+	sJamAfterStat				:= '  =005++M20-BG2', 
+	// ixWtZentrierenA			:= , not needed 
+	// strWtZentrierenA			:= , not needed 
+	ixJamBeforeStat				:=     _005_M40_MP1_BG11, 
+	// strVentilVorstopper		:= , not needed 
+	sValveMainstopper			:= '  =005++M01-MM1', 
+	// strVentilWtZentrierenA	:= , not needed 
+ 	// qxVorstopper				=> , not needed 
+	// qxWtKlemmenA				=> , not needed 
+	// qxWtKlemmenB				=> , not needed 
+	// in_iWTNr					:= , not needed 
+);
+_005_M20_MP1_WZ5_QM1_MB1	:= Bedieneinheit.ventile_ok	AND  	Wpc_St_090.qxMainstopper;
+_005_M20_MP1_WZ5_QM1_MB2	:= Bedieneinheit.ventile_ok	AND	NOT	Wpc_St_090.qxMainstopper;
+
+
+
+
+
+	
+
+(* ___________________________ *)
+(* Call Stopper at Station 70.1 *)
+WPC_PLACE_ID := cWpcPlaceM20_AtSt070_1;
+
+(* __________________________________ *)
+(*   IFM Identsystem for Station 70.1  *)
+(* rewrite WPC-No. *)
+rtRfid_St_70_1_WriteWpcId( CLK := (BDEButton = cActionM20_070_1_WriteWpcId));
+IF rtRfid_St_70_1_WriteWpcId.Q 	THEN Rfid_St_070_1.in_bWriteStart := TRUE; (* save intention to write - speichern, dass geschrieben werden soll *) END_IF
+IF Rfid_St_070_1.out_bIsWriting 	THEN Rfid_St_070_1.in_bWriteStart := FALSE; (* ...writing in progress - reset flag for intention to write *) END_IF
+
+Rfid_St_070_1.in_bReadStart := g_arrWtPlace[WPC_PLACE_ID]._bWpcIdentificationInProgress;
+Rfid_St_070_1(
+	MoNr						:= MoNr,
+	BedienEinheit				:= BedienEinheit,
+	FaultID						:= FaultID_Identsystem_M20_St70_1,
+	DisplayNr					:= DisplayNr,
+	StatString					:= 'IFM-GF1		',
+	in_sBetriebsmittelname		:= 'GF1		',
+	in_bChInUse					:= TRUE,
+	in_WtNrMin					:= 1,
+	in_WtNrMax					:= g_maxNumWt,
+);
+IF Rfid_St_070_1.out_bReadDone THEN
+	Rfid_St_070_1.in_bReadStart := FALSE;
+	g_arrWtPlace[WPC_PLACE_ID]._bWpcIdentificationInProgress := FALSE;
+	Wpc_St_070_1.in_iWTNr := Rfid_St_070_1.out_iUidRead; 
+END_IF
+
+Wpc_St_070_1(
+	MoNr						:= MoNr, 
+	BedienEinheit				:= Bedieneinheit, 
+	FaultID						:= FaultID_Wt_M20_St070_1, 
+	DisplayNr					:= DisplayNr, 
+	ioStat						:= g_arrStatInfo[	WPC_PLACE_ID],  
+	ioHere						:= g_arrWtPlace[	WPC_PLACE_ID], 
+	ioPrev						:= g_arrWtPlace[	cWpcPlaceNone], // not chained with stopper before that one 
+	ioNext						:= g_arrWtPlace[	cWpcPlaceM20_AtSt070_2], // chained with stopper after that one
+	
+	io_dwWpcFault				:= io_dwWpcFault,
+	io_dwWpcWaiting				:= io_dwWpcWaiting,
+	io_dwWpcWarning				:= io_dwWpcWarning,
+	
+	in_bIsOnlyMainStopper		:= FALSE,
+	ixPrestopper				:=     _005_M20_MP1_BG3,
+	sSensorPrestopper			:= 'BG3            ', 
+	ixMainstopper				:=     _005_M20_MP1_BG4, 
+	sSensorMainstopper			:= 'BG4            ', 
+	ixJamAfterStat				:= FALSE, 
+	sJamAfterStat				:= 'NONE', 
+	ixWtZentrierenA				:= FALSE , 
+	strWtZentrierenA			:= 'NONE',
+	ixJamBeforeStat				:=     _005_M20_MP1_BG2, 
+	sValvePrestopper			:= 'MM2', 
+	sValveMainstopper			:= 'MM3', 
+	sValveCenteringWpc			:= 'NONE',
+);
+_005_M20_MP1_WZ5_QM2_MB1	:= Bedieneinheit.ventile_ok AND  	Wpc_St_070_1.qxPrestopper;
+_005_M20_MP1_WZ5_QM2_MB2	:= Bedieneinheit.ventile_ok AND NOT Wpc_St_070_1.qxPrestopper;
+
+_005_M20_MP1_WZ5_QM3_MB1	:= Bedieneinheit.ventile_ok AND  	Wpc_St_070_1.qxMainstopper;
+_005_M20_MP1_WZ5_QM3_MB2	:= Bedieneinheit.ventile_ok AND NOT Wpc_St_070_1.qxMainstopper;
+
+
+
+
+(* ___________________________ *)
+(* Call Stopper at Station 70.2 *)
+WPC_PLACE_ID := cWpcPlaceM20_AtSt070_2;
+
+(* __________________________________ *)
+(*   IFM Identsystem for Station 70.2  *)
+(* rewrite WPC-No. *)
+rtRfid_St_70_2_WriteWpcId( CLK := (BDEButton = cActionM20_070_2_WriteWpcId));
+IF rtRfid_St_70_2_WriteWpcId.Q 	THEN Rfid_St_070_2.in_bWriteStart := TRUE; (* save intention to write - speichern, dass geschrieben werden soll *) END_IF
+IF Rfid_St_070_2.out_bIsWriting 	THEN Rfid_St_070_2.in_bWriteStart := FALSE; (* ...writing in progress - reset flag for intention to write *) END_IF
+
+Rfid_St_070_2.in_bReadStart := g_arrWtPlace[WPC_PLACE_ID]._bWpcIdentificationInProgress;
+Rfid_St_070_2(
+	MoNr						:= MoNr,
+	BedienEinheit				:= BedienEinheit,
+	FaultID						:= FaultID_Identsystem_M20_St70_2,
+	DisplayNr					:= DisplayNr,
+	StatString					:= 'IFM-GF2		',
+	in_sBetriebsmittelname		:= 'GF2		',
+	in_bChInUse					:= TRUE,
+	in_WtNrMin					:= 1,
+	in_WtNrMax					:= g_maxNumWt,
+);
+IF Rfid_St_070_2.out_bReadDone THEN
+	Rfid_St_070_2.in_bReadStart := FALSE;
+	g_arrWtPlace[WPC_PLACE_ID]._bWpcIdentificationInProgress := FALSE;
+	Wpc_St_070_2.in_iWTNr := Rfid_St_070_2.out_iUidRead; 
+END_IF
+
+Wpc_St_070_2(
+	MoNr						:= MoNr, 
+	BedienEinheit				:= Bedieneinheit, 
+	FaultID						:= FaultID_Wt_M20_St070_2, 
+	DisplayNr					:= DisplayNr, 
+	ioStat						:= g_arrStatInfo[	WPC_PLACE_ID],  
+	ioHere						:= g_arrWtPlace[	WPC_PLACE_ID], 
+	ioPrev						:= g_arrWtPlace[	cWpcPlaceM20_AtSt070_1], // chained with stopper before that one 
+	ioNext						:= g_arrWtPlace[	cWpcPlaceNone], // not chained with stopper after that one
+	
+	io_dwWpcFault				:= io_dwWpcFault,
+	io_dwWpcWaiting				:= io_dwWpcWaiting,
+	io_dwWpcWarning				:= io_dwWpcWarning,
+	
+	in_bIsOnlyMainStopper		:= FALSE,
+	ixPrestopper				:=     _005_M20_MP1_BG4,
+	sSensorPrestopper			:= 'BG4            ', 
+	ixMainstopper				:=     _005_M20_MP1_BG5, 
+	sSensorMainstopper			:= 'BG5            ', 
+	ixJamAfterStat				:=     _005_M20_MP1_BG6, 
+	sJamAfterStat				:= 'BG6            ', 
+	ixWtZentrierenA				:= FALSE,
+	strWtZentrierenA			:= 'NONE',
+	ixJamBeforeStat				:= FALSE, 
+	sValvePrestopper			:= 'MM4', 
+	sValveMainstopper			:= 'MM5', 
+	sValveCenteringWpc			:= 'NONE',
+);
+
+_005_M20_MP1_WZ5_QM5_MB1	:= Bedieneinheit.ventile_ok	AND 	Wpc_St_070_2.qxMainstopper;
+_005_M20_MP1_WZ5_QM5_MB2	:= Bedieneinheit.ventile_ok	AND	NOT	Wpc_St_070_2.qxMainstopper;
+	
+
+
+
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="M20_WPC">
+      <LineId Id="2408" Count="71" />
+      <LineId Id="2481" Count="30" />
+      <LineId Id="2721" Count="2" />
+      <LineId Id="2522" Count="0" />
+      <LineId Id="2524" Count="0" />
+      <LineId Id="2530" Count="29" />
+      <LineId Id="2561" Count="26" />
+      <LineId Id="2785" Count="0" />
+      <LineId Id="2589" Count="0" />
+      <LineId Id="2594" Count="2" />
+      <LineId Id="2592" Count="0" />
+      <LineId Id="2526" Count="1" />
+      <LineId Id="2523" Count="0" />
+      <LineId Id="2518" Count="0" />
+      <LineId Id="108" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

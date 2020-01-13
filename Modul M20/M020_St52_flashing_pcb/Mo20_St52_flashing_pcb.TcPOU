@@ -1,0 +1,1596 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.16">
+  <POU Name="Mo20_St52_flashing_pcb" Id="{9a90c2cb-742b-4b99-86c2-268396177e79}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK Mo20_St52_flashing_pcb
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<DESC>
+=INSERT DESCRIPTION FROM WORKFLOWPLAN=
+</DESC>
+
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-11-23	|	1.00	|	DWO		|	initial version
+
+</CHANGES>
+<VERSION>
+1.00
+</VERSION>
+
+<DEPENDENCIES>
+;
+</DEPENDENCIES>
+
+
+
+ -- overview of areas for steps --
+Steps [000..099]: 	Whatever Block
+Steps [100..199]:	Next Whatever Block
+
+  
+----------------------------------------------------------------------------------------*)
+
+
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	OrderNr: 			INT :=1;		(* Nr. Actorder *)
+	MoNr: 				INT:= 20;		(* Module-Number *)
+	StNr: 				INT:= 52;		(* Stationsnumber *)
+	BedienEinheit: 		ZENTR_DATA;		(* Central *)
+	FaultID: 			BYTE := 0;		(* ID for Error Array *)
+	DisplayNr: 			INT := 1;		(* Number of Textdisplay *)
+	MPart: 				INT := 1;		(* Machinepart *)
+	in_InitChainTxt:	STRING(39);		(* String for Step Chain Diagnosis *)
+	in_sKebaKurz:		STRING(gcKebaStKurzLen) := '1234567890'; (* optional - can also be assigned in initialisation paragraph *)
+	in_sKebaBez:		STRING(gcKebaStBezLen) 	:= '11111111112222222222333333333344444444445555555555'; (* optional - can also be assigned in initialisation paragraph *)
+END_VAR
+
+
+(* __________________ *)
+(* -- RT-Interface -- *)
+VAR_INPUT
+	RtNr:				INT := 01;
+	RtStNr:				SINT := 02;
+	RtStartimpuls:		BOOL:=FALSE;	
+END_VAR
+
+VAR_IN_OUT
+	//io_RtRegister:		ARRAY[1..6] OF ARRAY[1..4] OF DataTeil_pcb; // info for all parts within roundtable - the part for the station is accessed at [RtStNr]
+	io_RtStarts:		DWORD; // bit array (dword) representing station is working on roundtable (flow based)
+	io_RtFreigabe:		DWORD; // bit array (dword) representing station is giving permission for table to move (state based)
+	io_RtFault:			DWORD; // bit array (dword) representing error at RtStNr of roundtable
+	io_RtWaiting:		DWORD; // bit array (dword) representing waiting at RtStNr of roundtable
+	io_RtWarning:		DWORD; // bit array (dword) representing warning at RtStNr of roundtable
+END_VAR
+
+(* -- Handshake with MSP2000NET -- *)
+VAR_INPUT PERSISTENT
+	in_bFlashingReady		:BOOL:=FALSE;
+	in_bFlashingEnd			:BOOL:=FALSE;
+END_VAR
+VAR_OUTPUT PERSISTENT
+	out_bFlashingOK			:BOOL:=FALSE;
+END_VAR
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	SWI: 				BOOL := FALSE;	(* Impulse step is changing forward *)
+	SWR:				BOOL := FALSE;	(* Impulse step is changing backwards *)
+	Schritt: 			INT := 0;		(* Current step *)
+	UZ: 				TON;			(* watchtime *)
+	Fault: 				BOOL;			(* Stations Error *)
+	Waiting:			BOOL;			(* Station Waiting *)
+	Warning:			BOOL;			(* Station Warning *)
+	Betrieb: 			BOOL;			(* Enable Steps *)
+	StatEin: 			BOOL;			(* Station on *)
+	AllInPos: 			BOOL;			(* all cylinders in position and not actuated manually *)
+	Active:				BOOL;			(* stepchain is marked as active *)
+	Transport:			BOOL;			(* manual transport is enabled *)
+	InitRun:			BOOL;			(* goto homepos is enabled *)
+	CycleRun:			BOOL;			(* mode for single cycle is enabled *)
+	ManualRun:			BOOL;			(* move cylinders manually is enabled *)
+	BackwardsRun:		BOOL;			(* backwards run is enabled *)
+	tonSeitSwi:			TON;			(* time since last change of step *)
+	tonSeitAllInPos:	TON;			(* time since AllInPos has become TRUE *)
+	i:					INT;			(* index-runner for loops *)
+	xx:					FB_StepTracker;	(* auto record steps *)
+	StatString:			STRING(10);		(* '+MM=SS' *)
+	StartCondition:		BOOL;			(* condition for starting station *)
+	bStart:				BOOL;			(* station's work on roundtable is running *)
+	NestNr:				INT;			(* number of nest within fixation *)
+END_VAR
+
+VAR CONSTANT
+NEST1 :				INT :=1;
+NEST2 :				INT :=2;
+NEST3 :   			INT :=3;
+NEST4 :				INT :=4;
+END_VAR
+
+(* ___________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrFw,     Nr:=2391, Txt:='       =052HHPP'),
+	(* Error 02 *)		(Prio := ErrEndl,	Nr:=2392, Txt:='       =052HHPP'),
+	(* Error 03 *)		(Prio := ErrZyl,    Nr:=2393, Txt:='  =052 §Kopf§ 1'),
+	(* Error 04 *)		(Prio := ErrZyl,    Nr:=2393, Txt:='  =052 §Kopf§ 2'),
+	(* Error 05 *)		(Prio := ErrZyl,    Nr:=2393, Txt:='  =052 §Kopf§ 3'),
+	(* Error 06 *)		(Prio := ErrZyl,    Nr:=2393, Txt:='  =052 §Kopf§ 4'),
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/10            '),
+	(* Error 11 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/11            '),
+	(* Error 12 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/12            '),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13            '),
+	(* Error 14 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/14            '),
+	(* Error 15 *)		(Prio := ErrZyl, 	Nr:= 6502, Txt:='               '),
+	(* Error 16 *)		(Prio := ErrZyl, 	Nr:= 6504, Txt:='               ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ;
+	ixSeparateAcrossA: BOOL;
+	ixSeparateAcrossB: BOOL;
+
+END_VAR
+
+VAR CONSTANT
+	feMaintenanceEarlyWarning			:INT := 01;
+	feMaintenanceWaiting				:INT := 02;
+	feFlashingFailed_xTimesInRowHead_1	:INT := 03;
+	feFlashingFailed_xTimesInRowHead_2	:INT := 04;
+	feFlashingFailed_xTimesInRowHead_3	:INT := 05;
+	feFlashingFailed_xTimesInRowHead_4	:INT := 06;
+	feLcCheckSNRStateFailed:				INT := 15;
+	feLcGetRecipeFailed:					INT := 16;
+END_VAR
+(*
+MV,2391,*********** §Kontaktierungszähler§ 
+MV,2391,§Head§ ** Pin ** §Wartung bald fällig§
+MV,2392,*********** §Kontaktierungszähler§ 
+MV,2392,§Head§ ** Pin ** §Wartung jetzt fällig§
+MV,2393,*************** Flashing UIF PCP
+MV,2393,§x-mal in Folge§ §fehlgeschlagen§
+*)
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+	BDE_bFlashingHeadEnabled	:ARRAY[HEAD_1..HEAD_4] OF BOOL;
+	
+	_bFlashingInProgress		:BOOL:=FALSE;	(* "Flashing Station" is Running (Signal for the Roundtable) *)
+
+	_bPart_1_toBeFlashed		:BOOL:=FALSE;
+	_bPart_2_toBeFlashed		:BOOL:=FALSE;
+	_bPart_3_toBeFlashed		:BOOL:=FALSE;
+	_bPart_4_toBeFlashed		:BOOL:=FALSE;
+
+
+	(* == Cylinders == *)
+	zyl2_Operate_ver_stroke			:ZYL2; (* MM1 *)
+	ix_Operate_ver_strokeA			:BOOL:=FALSE;
+	ix_Operate_ver_strokeB			:BOOL:=FALSE;
+
+
+	(* == ProMik == *)
+	_selectedHead				:INT := HEAD_1; (* Runner *)
+	sCommandToSend				:T_MaxString; 	(* ';FLASH; SNR=TEST123; CPU=S9KEAZN; ERASE=1; CHECK=1; U=5.00V; TOL+=0.2; TOL-=0.2; DIR=C:/; FILE=05553_453_0001.hex.s19 $r'; *)
+	sProVersion					:String;
+	_bStartFlashing				:ARRAY[HEAD_1..HEAD_4] OF BOOL;
+	_eFlashingProgress			:ARRAY[HEAD_1..HEAD_4] OF E_Flashing_Progress;
+	_swiFlash					:ARRAY[HEAD_1..HEAD_4] OF BOOL;
+	_uzFlash					:ARRAY[HEAD_1..HEAD_4] OF TON;
+ 
+	
+	SendBuffer:					ARRAY[HEAD_1..HEAD_4] OF T_MaxString;
+	RecvBuffer:					ARRAY[HEAD_1..HEAD_4] OF T_MaxString;
+                    		
+	MessageID					:UINT := 0;
+	sTmpMessage					:T_MaxString;
+	findPos						:INT := 0;
+	ACKValue					:INT := -1;
+	bEnableComm					:BOOL:=TRUE;
+
+	xTimesError:				ARRAY[HEAD_1..HEAD_4] OF AwFehler;	
+	
+END_VAR
+
+
+
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+	
+	fbProMik:					ARRAY[HEAD_1..HEAD_4] OF FB_PROMIK_TCP_IP;
+
+END_VAR
+
+(* _______________ *)
+(* -- Constants -- *)
+VAR CONSTANT
+	HEAD_1						:INT := 1;
+	HEAD_2						:INT := 2;
+	HEAD_3						:INT := 3;
+	HEAD_4						:INT := 4;
+
+	SIDE_LOADING				:INT := 1;
+	SIDE_FLASHING				:INT := 2;
+END_VAR
+
+(* ____________________ *)
+(* -- LineController -- *)
+VAR
+	LC_Cavity1					:FB_LcStationCommandHandler;
+	LC_Cavity2					:FB_LcStationCommandHandler;
+	LC_Cavity3					:FB_LcStationCommandHandler;
+	LC_Cavity4					:FB_LcStationCommandHandler;
+	TypeNo						:STRING(40);
+	SerialNo					:STRING(14);
+	DataIndex					:UDINT := 1;
+
+END_VAR
+
+VAR PERSISTENT
+	OutUserData					:ARRAY[1..100] OF BYTE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+(* -- Initialisation -- *)
+IF neustart OR g_bOnlineChange THEN
+	StatString 		:= RIGHT(CONCAT( '000',INT_TO_STRING(StNr) ),3); (* three digits station's prefix is being created automatically for station *)
+	in_InitChainTxt := CONCAT( StatString, ' Flashing PCB(InitChain)' );
+	in_sKebaKurz	:= CONCAT( StatString, ' Flash'); // 3+7 digits
+	in_sKebaBez		:= in_InitChainTxt;
+END_IF
+
+
+KebaInitStation(
+	Panelnummer		:= gKebaAktPanel,
+	Aktiv			:= TRUE,
+	Kurzbezeichnung	:= in_sKebaKurz,
+	Bezeichnung		:= in_sKebaBez,
+	ManuellAktiv	:= TRUE,
+	RueckwaertsAktiv:= FALSE,
+	GsAktiv			:= FALSE,
+);
+
+
+(* _______________________________________ *)
+(* -- Entry for Step Sequence Diagnosis -- *)
+InitChain(
+	Step 			:= Schritt,
+	InitialState 	:= TRUE,
+	Fault 			:= Fault,
+	Waiting 		:= Waiting,
+	Warning 		:= Warning,
+	AllInPos 		:= AllInPos,
+	RunOpenDoor 	:= TRUE,
+	Txt 			:= in_InitChainTxt,
+	BedienEinheit 	:= BedienEinheit,
+	Active 			:= Active,
+	Transport 		:= Transport,
+	InitRun 		:= InitRun,
+	CycleRun 		:= CycleRun,
+	ManualRun 		:= ManualRun,
+	BackwardsRun 	:= BackwardsRun);
+InitRun := FALSE;
+
+
+(* _______________ *)
+(* -- Parameter -- *)
+StatEin 	:= ActOrd[MPart].ord_stat[OrderNr].sd_ein;
+StatEin 							:= 				ActOrd[MPart].ord_stat[OrderNr].sd_ein;
+BDE_bFlashingHeadEnabled[HEAD_1]	:=	StatEin AND ActOrd[Mpart].ord_stat[OrderNr].sd_ein;
+BDE_bFlashingHeadEnabled[HEAD_2]	:=	StatEin AND ActOrd[Mpart].ord_stat[OrderNr].sd_z1;
+BDE_bFlashingHeadEnabled[HEAD_3]	:=	StatEin AND ActOrd[Mpart].ord_stat[OrderNr].sd_z2;
+BDE_bFlashingHeadEnabled[HEAD_4]	:=	StatEin AND ActOrd[Mpart].ord_stat[OrderNr].sd_z3;
+
+
+(* ____________ *)
+(* -- Inputs -- *)
+ix_Operate_ver_strokeA		:=_052_M20_MP1_BG1_A;
+ix_Operate_ver_strokeB		:=_052_M20_MP1_BG1_B;
+
+
+(* _______________________ *)
+(* -- Timer / Watchdogs -- *)
+UZ( IN:= NOT SWI AND BedienEinheit.grundbed, PT:= T#5s );
+tonSeitSwi( IN := NOT SWI AND Bedieneinheit.grundbed, PT := t#30d );
+tonSeitAllInPos( IN := AllInPos AND Bedieneinheit.grundbed, PT := t#30d );
+
+
+(* _______________ *)
+(* -- Cylinders -- *)
+
+zyl2_Operate_ver_stroke(
+	grundbed:= Bedieneinheit.grundbed, 
+	a:= ix_Operate_ver_strokeA, 
+	b:= ix_Operate_ver_strokeB, 
+	enable_man:= Bedieneinheit.ventile_ok, 
+	FNr:= 212, 
+	FNrMan:= 612, 
+	FAnz:= DisplayNr, 
+	StNr:= StatString, 
+	ZylNr:= '1', 
+	ID:= FaultId, 
+	Bild:= picStandard, 
+	BildB:= picStandardInv,
+ 						);
+
+AllInPos :=	zyl2_Operate_ver_stroke.pos;
+
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID, FAnz:= DisplayNr, EF:= Errors1, F:= f1 );
+
+Fault	:= zyl2_Operate_ver_stroke.err	(* Error´s of function blocks *);
+Warning := FALSE;
+Waiting := FALSE;
+FOR i := 1 TO ErrMaxBits BY 1 DO
+	IF f1[i] THEN
+		IF 		Errors1[i].Prio <= ErrZyl 			THEN Fault := TRUE;
+		ELSIF	Errors1[i].Prio <= ErrEndl 			THEN Waiting := TRUE; f1[i] := FALSE;
+		ELSIF	Errors1[i].Prio <= ErrWechselpos	THEN Warning := TRUE; f1[i] := FALSE; END_IF
+	END_IF
+END_FOR
+
+
+// report Error, Waiting and Warning to cell
+IF Fault 	THEN io_RtFault 	:= SETBIT32( io_RtFault,   RtStNr ); END_IF
+IF Waiting 	THEN io_RtWaiting 	:= SETBIT32( io_RtWaiting, RtStNr ); END_IF
+IF Warning	THEN io_RtWarning	:= SETBIT32( io_RtWarning, RtStNr ); END_IF
+
+
+(* Create Errrors / Misc. Errors *)
+
+
+(* __________________________________ *)
+(* -- Station - Allowed to Operate -- *)
+Betrieb := 	Bedieneinheit.betrieb
+		AND NOT Fault
+		AND NOT ManualRun
+		AND BedienEinheit.ventile_ok;
+
+_bPart_1_toBeFlashed := 
+		(		arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.teilestatus >= srGood			(* 	Part 1	present *)	
+		AND	NOT arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.Mo20_St052.bFlashingDone	(*		and	not Flashing done *)
+		AND	BDE_bFlashingHeadEnabled[HEAD_1]	);
+
+_bPart_2_toBeFlashed := 
+		(		arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.teilestatus >= srGood			(* 	Part 2	present *)	
+		AND	NOT arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.Mo20_St052.bFlashingDone	(*		and	not Flashing done *)
+		AND	BDE_bFlashingHeadEnabled[HEAD_2]	);
+		
+
+_bPart_3_toBeFlashed := 
+		(		arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.teilestatus >= srGood			(* 	Part 3	present *)	
+		AND	NOT arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.Mo20_St052.bFlashingDone	(*		and	not Flashing done *)
+		AND	BDE_bFlashingHeadEnabled[HEAD_3]	);
+
+
+_bPart_4_toBeFlashed := 
+		(		arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.teilestatus >= srGood			(* 	Part 4	present *)	
+		AND	NOT arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.Mo20_St052.bFlashingDone	(*		and	not Flashing done *)
+		AND	BDE_bFlashingHeadEnabled[HEAD_4]	);		
+
+(* ____________________ *)
+(* -- Start Station  -- *)
+IF 	RtStartimpuls THEN
+	StartCondition 
+		:= 	StatEin
+		AND	(_bPart_1_toBeFlashed
+			OR	_bPart_2_toBeFlashed
+			OR	_bPart_3_toBeFlashed
+			OR	_bPart_4_toBeFlashed
+			);
+					
+	IF StartCondition THEN bStart := TRUE; END_IF
+END_IF
+
+(* ____________ *)
+(* -- Head 4 -- *)
+
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin5].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 5'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin5].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_4_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 5'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin4].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin4].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_4_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin3].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin3].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_4_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin2].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin2].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_4_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin1].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head4_Pin1].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_4_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Pin  Number *)
+	END_IF
+
+(* ____________ *)
+(* -- Head 3 -- *)
+
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin5].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 5'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin5].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_3_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 5'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin4].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin4].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_3_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin3].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin3].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_3_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin2].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin2].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_3_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin1].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head3_Pin1].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_3_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Pin  Number *)
+	END_IF
+
+(* ____________ *)
+(* -- Head 2 -- *)
+
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin5].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 5'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin5].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_2_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 5'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin4].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin4].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_2_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin3].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin3].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_2_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin2].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin2].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_2_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin1].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head2_Pin1].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_2_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Pin  Number *)
+	END_IF
+
+(* ____________ *)
+(* -- Head 1 -- *)
+
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin5].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 5'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin5].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_1_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 5'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin4].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 4'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin4].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_1_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 4'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin3].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 3'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin3].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_1_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 3'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin2].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 2'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin2].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_1_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 2'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin1].FromBDE.bPreStop THEN
+		f1[feMaintenanceEarlyWarning] := TRUE;
+		Errors1[feMaintenanceEarlyWarning].Txt := 													'       =052';
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Head Number *)
+		Errors1[feMaintenanceEarlyWarning].Txt := CONCAT( Errors1[feMaintenanceEarlyWarning].Txt,	' 1'); (* Pin  Number *)
+	END_IF
+	IF Wartungen[serviceCnt_M20_St052_Head1_Pin1].FromBDE.bStop
+	AND _bFlashingInProgress
+	AND _bPart_1_toBeFlashed
+	THEN
+		f1[feMaintenanceWaiting] := TRUE;
+		Errors1[feMaintenanceWaiting].Txt := 																'       =052';
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Head Number *)
+		Errors1[feMaintenanceWaiting].Txt := CONCAT( Errors1[feMaintenanceWaiting].Txt,				' 1'); (* Pin  Number *)
+	END_IF
+
+(* _____________________ *)
+(* -- Line Controller -- *)
+LC_Cavity1.in_Data.OutUserData := ADR(OutUserData);
+LC_Cavity1.in_Data.OutUserData_BufferSize := SIZEOF(OutUserData);
+LC_Cavity1(
+		MoNr				:= MoNr, 
+		StNr				:= StNr, 
+		FaultID				:= FaultID, 
+		DisplayNr			:= DisplayNr, 
+		in_strBMK			:= 'LC', 
+		in_bConnect			:= BedienEinheit.notaus_ok, 
+		in_bEnableLog		:= TRUE, 
+		in_sRemoteHost		:= IP_LineController, 
+		in_uiRemotePort		:= 20521,//INT_TO_UINT(MoNr * 10000 + StNr + Nest1),
+		in_uiStationID		:= 252,
+		in_uiStationSubID	:= 1, 
+		in_bTelegram64kB	:= FALSE, 
+		in_bTypbeschrUebertr:= FALSE
+);
+
+LC_Cavity2.in_Data.OutUserData := ADR(OutUserData);
+LC_Cavity2.in_Data.OutUserData_BufferSize := SIZEOF(OutUserData);
+
+LC_Cavity2(
+		MoNr				:= MoNr, 
+		StNr				:= StNr, 
+		FaultID				:= FaultID, 
+		DisplayNr			:= DisplayNr, 
+		in_strBMK			:= 'LC', 
+		in_bConnect			:= BedienEinheit.notaus_ok, 
+		in_bEnableLog		:= TRUE, 
+		in_sRemoteHost		:= IP_LineController, 
+		in_uiRemotePort		:= 20522,//INT_TO_UINT(MoNr * 10000 + StNr + Nest2),
+		in_uiStationID		:= 252,
+		in_uiStationSubID	:= 2, 
+		in_bTelegram64kB	:= FALSE, 
+		in_bTypbeschrUebertr:= FALSE
+);
+
+LC_Cavity3.in_Data.OutUserData := ADR(OutUserData);
+LC_Cavity3.in_Data.OutUserData_BufferSize := SIZEOF(OutUserData);
+LC_Cavity3(
+		MoNr				:= MoNr, 
+		StNr				:= StNr, 
+		FaultID				:= FaultID, 
+		DisplayNr			:= DisplayNr, 
+		in_strBMK			:= 'LC', 
+		in_bConnect			:= BedienEinheit.notaus_ok, 
+		in_bEnableLog		:= TRUE, 
+		in_sRemoteHost		:= IP_LineController, 
+		in_uiRemotePort		:= 20523,//INT_TO_UINT(MoNr * 10000 + StNr + Nest1),
+		in_uiStationID		:= 252,
+		in_uiStationSubID	:= 3, 
+		in_bTelegram64kB	:= FALSE, 
+		in_bTypbeschrUebertr:= FALSE
+);
+
+LC_Cavity4.in_Data.OutUserData := ADR(OutUserData);
+LC_Cavity4.in_Data.OutUserData_BufferSize := SIZEOF(OutUserData);
+
+LC_Cavity4(
+		MoNr				:= MoNr, 
+		StNr				:= StNr, 
+		FaultID				:= FaultID, 
+		DisplayNr			:= DisplayNr, 
+		in_strBMK			:= 'LC', 
+		in_bConnect			:= BedienEinheit.notaus_ok, 
+		in_bEnableLog		:= TRUE, 
+		in_sRemoteHost		:= IP_LineController, 
+		in_uiRemotePort		:= 20524,//INT_TO_UINT(MoNr * 10000 + StNr + Nest2),
+		in_uiStationID		:= 252,
+		in_uiStationSubID	:= 4, 
+		in_bTelegram64kB	:= FALSE, 
+		in_bTypbeschrUebertr:= FALSE
+);
+
+(* ________________ *)
+(* -- Step-Chain -- *)
+xx( iStep := Schritt );
+
+(* reset flags *)
+
+SWI := FALSE;
+
+CASE Schritt OF
+0:	xx.x := 'in basepos. - wait for prework or station´s start';
+
+	IF  AllInPos
+	AND bStart
+	AND BedienEinheit.anl_ein
+	//AND	_bFlashingInProgress
+	AND Betrieb THEN
+		
+		IF f1[feMaintenanceWaiting] 
+		THEN
+			Errors1[feMaintenanceWaiting].Prio := ErrEndl;
+
+		ELSE
+			Schritt := Schritt + 2;
+			SWI := TRUE;
+		END_IF
+	END_IF
+
+02: xx.x := 'CheckSerialnumberState (OP15) in LineController';	
+	IF arrCarrierData[RtNr][RtStNr][Nest1].PartDatapcb.teilestatus = srempty OR arrCarrierData[RtNr][RtStNr][Nest1].PartDatapcb.iFehlercode = bcM20_St051_ReadDMCCodeNotRead_1 THEN
+		Schritt := Schritt + 2;
+		SWI := TRUE; 
+	ELSE
+		LC_Cavity1.checkSNRState(arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.strTypeNr,arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.strTeileId,0);
+		IF LC_Cavity1.comcheckSNRState.bDone THEN
+		IF LC_Cavity1.comcheckSNRState.bValid 
+		THEN
+				Schritt := Schritt+2;
+				SWI := TRUE;
+		ELSIF LC_Cavity1.out_Data.ACK_Numer = 10 THEN
+				Schritt := Schritt+1;
+				SWI := TRUE;
+		ELSE // Error from LineController
+			f1[feLcCheckSNRStateFailed] := TRUE;
+			
+				arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.teilestatus:=srBad;
+				Schritt := Schritt+1;
+				SWI := TRUE;
+			
+		END_IF
+	END_IF	
+	END_IF
+	
+
+03:	xx.x := 'Error Reset';
+	IF NOT f1[feLcCheckSNRStateFailed] THEN
+		Schritt := Schritt+1;
+		SWI := TRUE;
+	END_IF
+	
+04: xx.x := 'CheckSerialnumberState (OP15) in LineController';	
+	IF arrCarrierData[RtNr][RtStNr][Nest2].PartDatapcb.teilestatus = srempty OR arrCarrierData[RtNr][RtStNr][Nest2].PartDatapcb.iFehlercode = bcM20_St051_ReadDMCCodeNotRead_1 THEN
+		Schritt := Schritt + 2;
+		SWI := TRUE; 
+	ELSE
+		LC_Cavity2.checkSNRState(arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.strTypeNr,arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.strTeileId,0);
+		IF LC_Cavity2.comcheckSNRState.bDone THEN
+		IF LC_Cavity2.comcheckSNRState.bValid 
+		THEN
+				Schritt := Schritt+1;
+				SWI := TRUE;
+		ELSIF LC_Cavity2.out_Data.ACK_Numer = 10 THEN
+				Schritt := Schritt+1;
+				SWI := TRUE;
+		ELSE // Error from LineController
+			f1[feLcCheckSNRStateFailed] := TRUE;
+			
+				arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.teilestatus:=srBad;
+				Schritt := Schritt+1;
+				SWI := TRUE;
+			
+		END_IF
+		END_IF	
+	END_IF
+	
+
+05:	xx.x := 'Error Reset';
+	IF NOT f1[feLcCheckSNRStateFailed] THEN
+		Schritt := Schritt+1;
+		SWI := TRUE;
+	END_IF	
+
+06: xx.x := 'CheckSerialnumberState (OP15) in LineController';
+	IF arrCarrierData[RtNr][RtStNr][Nest3].PartDatapcb.teilestatus = srempty OR arrCarrierData[RtNr][RtStNr][Nest3].PartDatapcb.iFehlercode = bcM20_St051_ReadDMCCodeNotRead_2 THEN
+		Schritt := Schritt + 2;
+		SWI := TRUE; 
+	ELSE
+	LC_Cavity3.checkSNRState(arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.strTypeNr,arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.strTeileId,0);
+	IF LC_Cavity3.comcheckSNRState.bDone THEN
+		IF LC_Cavity3.comcheckSNRState.bValid 
+		THEN
+				Schritt := Schritt+1;
+				SWI := TRUE;
+		ELSIF LC_Cavity3.out_Data.ACK_Numer = 10 THEN
+				Schritt := Schritt+1;
+				SWI := TRUE;
+		ELSE // Error from LineController
+			f1[feLcCheckSNRStateFailed] := TRUE;
+			
+				arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.teilestatus:=srBad;
+				Schritt := Schritt+1;
+				SWI := TRUE;
+			
+		END_IF
+	END_IF	
+	END_IF	
+	
+
+07:	xx.x := 'Error Reset';
+	IF NOT f1[feLcCheckSNRStateFailed] THEN
+		Schritt := Schritt+1;
+		SWI := TRUE;
+	END_IF	
+
+08: xx.x := 'CheckSerialnumberState (OP15) in LineController';	
+	IF arrCarrierData[RtNr][RtStNr][Nest4].PartDatapcb.teilestatus = srempty OR arrCarrierData[RtNr][RtStNr][Nest4].PartDatapcb.iFehlercode = bcM20_St051_ReadDMCCodeNotRead_2 THEN
+		Schritt := Schritt + 2;
+		SWI := TRUE; 
+	ELSE
+	LC_Cavity4.checkSNRState(arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.strTypeNr,arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.strTeileId,0);
+	IF LC_Cavity4.comcheckSNRState.bDone THEN
+		IF LC_Cavity4.comcheckSNRState.bValid 
+		THEN
+				Schritt := Schritt+2;
+				SWI := TRUE;
+		ELSIF LC_Cavity4.out_Data.ACK_Numer = 10 THEN
+				Schritt := Schritt+1;
+				SWI := TRUE;
+		ELSE // Error from LineController
+			f1[feLcCheckSNRStateFailed] := TRUE;
+			
+				arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.teilestatus:=srBad;
+				Schritt := Schritt+1;
+				SWI := TRUE;
+			
+		END_IF
+	END_IF		
+	END_IF
+	
+
+09:	xx.x := 'Error Reset';
+	IF NOT f1[feLcCheckSNRStateFailed] THEN
+		Schritt := Schritt+1;
+		SWI := TRUE;
+	END_IF
+	
+10:	xx.x := 'MM1 Vertical -> ON (downwards)';
+
+	IF 	AllInPos
+	AND	(tonSeitAllInPos.ET >= T#30MS) 
+	AND Betrieb THEN
+		Schritt := 100;
+		SWI := TRUE;
+		
+		IF _bPart_1_toBeFlashed THEN 
+			Wartungen[serviceCnt_M20_St052_Head1_Pin1].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin1].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head1_Pin2].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin2].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head1_Pin3].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin3].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head1_Pin4].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin4].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head1_Pin5].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin5].ToBDE.iCounter + 1;
+		END_IF
+		IF _bPart_2_toBeFlashed THEN 
+			Wartungen[serviceCnt_M20_St052_Head2_Pin1].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin1].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head2_Pin2].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin2].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head2_Pin3].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin3].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head2_Pin4].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin4].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head2_Pin5].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin5].ToBDE.iCounter + 1;
+		END_IF
+		IF _bPart_3_toBeFlashed THEN 
+			Wartungen[serviceCnt_M20_St052_Head3_Pin1].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin1].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head3_Pin2].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin2].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head3_Pin3].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin3].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head3_Pin4].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin4].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head3_Pin5].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin5].ToBDE.iCounter + 1;
+		END_IF
+		IF _bPart_4_toBeFlashed THEN 
+			Wartungen[serviceCnt_M20_St052_Head4_Pin1].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin1].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head4_Pin2].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin2].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head4_Pin3].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin3].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head4_Pin4].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin4].ToBDE.iCounter + 1;
+			Wartungen[serviceCnt_M20_St052_Head4_Pin5].ToBDE.iCounter := Wartungen[serviceCnt_M20_St052_Head1_Pin5].ToBDE.iCounter + 1;
+		END_IF
+		
+	END_IF
+	
+100: xx.x := 'start flashing';
+
+	IF 	AllInPos
+	AND Betrieb THEN
+		_bStartFlashing[HEAD_1]	:= _bPart_1_toBeFlashed;
+		_bStartFlashing[HEAD_2]	:= _bPart_2_toBeFlashed;
+		_bStartFlashing[HEAD_3]	:= _bPart_3_toBeFlashed;
+		_bStartFlashing[HEAD_4]	:= _bPart_4_toBeFlashed;
+
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+
+110:	xx.x	:= 'flashing...';
+	IF 	( (_eFlashingProgress[HEAD_1] = E_Flashing_Progress.DONE) OR NOT _bPart_1_toBeFlashed) 
+	AND ( (_eFlashingProgress[HEAD_2] = E_Flashing_Progress.DONE) OR NOT _bPart_2_toBeFlashed)
+	AND ( (_eFlashingProgress[HEAD_3] = E_Flashing_Progress.DONE) OR NOT _bPart_3_toBeFlashed)
+	AND ( (_eFlashingProgress[HEAD_4] = E_Flashing_Progress.DONE) OR NOT _bPart_4_toBeFlashed)
+	AND AllInPos
+	AND Betrieb 
+	THEN
+		Schritt := 150;		//DWOCOM
+		SWI := TRUE;
+
+		_eFlashingProgress[HEAD_1] := E_Flashing_Progress.IDLE;
+		_eFlashingProgress[HEAD_2] := E_Flashing_Progress.IDLE;
+		_eFlashingProgress[HEAD_3] := E_Flashing_Progress.IDLE;
+		_eFlashingProgress[HEAD_4] := E_Flashing_Progress.IDLE;
+	END_IF
+
+150: xx.xx:= 'LineController socket ready';
+	IF	NOT LC_Cavity1.out_bBusy THEN
+
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+151:xx.x := 'Upload result to LC';
+	IF arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.teilestatus = srGood THEN
+		arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.Mo20_St052.sProgramVersion:=sProVersion;
+		LC_Cavity1.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+	ELSIF arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.iFehlercode= bcM20_St052_FlashPCBFailed THEN
+		LC_Cavity1.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.strTeileId,
+										bcM20_St052_FlashPCBFailed,(*Fail_Location*)
+										LCID_FAIL_FLASHING_Failed(*Fail_Type*) 
+									);
+	ELSIF arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.iFehlercode= bcM20_St052_FlashingAborted THEN
+		LC_Cavity1.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.strTeileId,
+										bcM20_St052_FlashingAborted,(*Fail_Location*)
+										LCID_FAIL_FLASHING_Aborted(*Fail_Type*) 
+									);
+	ELSE
+		Schritt := Schritt + 9;
+		SWI := TRUE;
+	END_IF
+	IF (LC_Cavity1.comUploadStateAndResultData.bStarted OR LC_Cavity1.comUploadStateAndResultData.bDone) THEN
+		Schritt := Schritt + 9;
+		SWI := TRUE;
+	END_IF;	
+
+160: xx.xx:= 'LineController socket ready';
+	IF	NOT LC_Cavity2.out_bBusy THEN
+
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+161:xx.x := 'Upload result to LC';
+	IF arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.teilestatus = srGood THEN
+		arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.Mo20_St052.sProgramVersion:=sProVersion;
+		LC_Cavity2.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+	ELSIF arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.iFehlercode= bcM20_St052_FlashPCBFailed THEN
+		LC_Cavity2.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.strTeileId,
+										bcM20_St052_FlashPCBFailed,(*Fail_Location*)
+										LCID_FAIL_FLASHING_Failed(*Fail_Type*) 
+									);
+	ELSIF arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.iFehlercode= bcM20_St052_FlashingAborted THEN
+		LC_Cavity2.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.strTeileId,
+										bcM20_St052_FlashingAborted,(*Fail_Location*)
+										LCID_FAIL_FLASHING_Aborted(*Fail_Type*) 
+									);
+	ELSE
+		Schritt := Schritt + 9;
+		SWI := TRUE;
+	END_IF
+	IF (LC_Cavity2.comUploadStateAndResultData.bStarted OR LC_Cavity2.comUploadStateAndResultData.bDone) THEN
+		Schritt := Schritt + 9;
+		SWI := TRUE;
+	END_IF;	
+
+170: xx.xx:= 'LineController socket ready';
+	IF	NOT LC_Cavity3.out_bBusy THEN
+
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+171:xx.x := 'Upload result to LC';
+	IF arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.teilestatus = srGood THEN
+		arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.Mo20_St052.sProgramVersion:=sProVersion;
+		LC_Cavity3.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+	ELSIF arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.iFehlercode= bcM20_St052_FlashPCBFailed THEN
+		LC_Cavity3.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.strTeileId,
+										bcM20_St052_FlashPCBFailed,(*Fail_Location*)
+										LCID_FAIL_FLASHING_Failed(*Fail_Type*) 
+									);
+	ELSIF arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.iFehlercode= bcM20_St052_FlashingAborted THEN
+		LC_Cavity3.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.strTeileId,
+										bcM20_St052_FlashingAborted,(*Fail_Location*)
+										LCID_FAIL_FLASHING_Aborted(*Fail_Type*) 
+									);
+	ELSE
+		Schritt := Schritt + 9;
+		SWI := TRUE;
+	END_IF
+	IF (LC_Cavity3.comUploadStateAndResultData.bStarted OR LC_Cavity3.comUploadStateAndResultData.bDone) THEN
+		Schritt := Schritt + 9;
+		SWI := TRUE;
+	END_IF;	
+
+180: xx.xx:= 'LineController socket ready';
+	IF	NOT LC_Cavity4.out_bBusy THEN
+
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+181:xx.x := 'Upload result to LC';
+	IF arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.teilestatus = srGood THEN
+		arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.Mo20_St052.sProgramVersion:=sProVersion;
+		LC_Cavity4.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+	ELSIF arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.iFehlercode= bcM20_St052_FlashPCBFailed THEN
+		LC_Cavity4.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.strTeileId,
+										bcM20_St052_FlashPCBFailed,(*Fail_Location*)
+										LCID_FAIL_FLASHING_Failed(*Fail_Type*) 
+									);
+	ELSIF arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.iFehlercode= bcM20_St052_FlashingAborted THEN
+		LC_Cavity4.UploadStateAndResultData(	arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.strTypeNr,
+										arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.strTeileId,
+										bcM20_St052_FlashingAborted,(*Fail_Location*)
+										LCID_FAIL_FLASHING_Aborted(*Fail_Type*) 
+									);
+	ELSE
+		Schritt := Schritt + 19;
+		SWI := TRUE;
+	END_IF
+	IF (LC_Cavity4.comUploadStateAndResultData.bStarted OR LC_Cavity4.comUploadStateAndResultData.bDone) THEN
+		Schritt := Schritt + 19;
+		SWI := TRUE;
+	END_IF;		
+	
+200:xx.x := 'MM1 Vertical -> OFF (upwards)';
+	IF	AllInPos
+	AND	Betrieb THEN
+		_bFlashingInProgress := FALSE;
+		bStart := FALSE;
+		Schritt := 0;
+		SWI := TRUE;
+		(*DWOCOM test*)
+		(*arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.Init();
+		arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.Init();
+		arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.Init();
+		arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.Init();
+		arrCarrierData[RtNr][RtStNr][HEAD_1].PartDataPcb.teilestatus:=srGood;
+		arrCarrierData[RtNr][RtStNr][HEAD_2].PartDataPcb.teilestatus:=srGood;
+		arrCarrierData[RtNr][RtStNr][HEAD_3].PartDataPcb.teilestatus:=srGood;
+		arrCarrierData[RtNr][RtStNr][HEAD_4].PartDataPcb.teilestatus:=srGood;*)
+	END_IF
+END_CASE
+
+
+(* _____________________________________ *)
+(* -- Communication with Flashing 1-4 -- *)
+IF 		_bStartFlashing[HEAD_1]
+	OR	_bStartFlashing[HEAD_2]
+	OR	_bStartFlashing[HEAD_3]
+	OR	_bStartFlashing[HEAD_4]
+THEN
+	sCommandToSend := ';FLASH; SNR=00884014622700; CPU=R5F10xxC; ERASE=1; CHECK=1; U=3.30; TOL+=0.2; TOL-=0.2; DIR=C:/; FILE=05553-519-0004.s19 $r';
+	sProVersion:='05553-519-0004';
+
+END_IF
+
+
+FOR _SelectedHead := HEAD_1 TO HEAD_4
+DO
+	_uzFlash[_selectedHead]( IN := NOT _swiFlash[_selectedHead] AND Bedieneinheit.notaus_ok, PT := T#15S ); /// Zeit anpassen
+	_swiFlash[_selectedHead] := FALSE;	
+
+
+	CASE _eFlashingProgress[	_SelectedHead] OF
+	E_Flashing_Progress.IDLE:
+
+		IF _bStartFlashing[	_SelectedHead] THEN
+			_eFlashingProgress[	_SelectedHead] := E_Flashing_Progress.SEND_START;
+			_swiFlash[_selectedHead] := TRUE;
+
+			(* generate Telegram *)
+			MessageID := MessageID + 1;	
+			SendBuffer[		_SelectedHead] := CONCAT(UINT_TO_STRING(MessageID), sCommandToSend); 
+			_bStartFlashing[_SelectedHead] := FALSE;
+		END_IF
+
+	E_Flashing_Progress.SEND_START:
+		fbProMik[		_SelectedHead].in_bStartSendData := TRUE;
+		IF 	fbProMik[	_SelectedHead].out_bDataWasSent THEN
+			_eFlashingProgress[	_SelectedHead] := E_Flashing_Progress.WAIT_RESULT;
+			_swiFlash[_selectedHead] := TRUE;
+
+
+		ELSIF NOT BDE_bFlashingHeadEnabled[ _SelectedHead] THEN
+			(* abort *)
+			_eFlashingProgress[	_SelectedHead] := E_Flashing_Progress.ABORT;
+			_swiFlash[_selectedHead] := TRUE;
+		END_IF
+
+
+	E_Flashing_Progress.WAIT_RESULT:
+
+		IF _uzFlash[_selectedHead].q							// timeout 
+		THEN
+			_eFlashingProgress[	_SelectedHead] := E_Flashing_Progress.ABORT;
+
+		ELSIF fbProMik[		_SelectedHead].out_bNewDataRecv		// data from flashing received 
+		THEN	
+			findPos := FIND( RecvBuffer[_SelectedHead], ';');
+			sTmpMessage := DELETE( sTmpMessage, findPos, 0);
+			findPos := FIND( sTmpMessage, ';');
+			sTmpMessage := DELETE( sTmpMessage, findPos, 0);
+			findPos := FIND( sTmpMessage, ';');
+			ACKValue :=  STRING_TO_INT( LEFT( sTmpMessage, findPos-1)); // without ; in string
+			RecvBuffer[_SelectedHead] := sTmpMessage;
+
+			IF ACKValue = 0 
+			THEN // flashing succeeded 
+				xTimesError[	_selectedHead].igut := TRUE;
+
+			ELSE // flashing failed
+				IF arrCarrierData[RtNr][RtStNr][_SelectedHead].PartDataPcb.teilestatus >= srGood
+				THEN
+					xTimesError[	_selectedHead].ischl := TRUE;
+		
+					arrCarrierData[RtNr][RtStNr][_SelectedHead].PartDataPcb.teilestatus := srBad;
+					arrCarrierData[RtNr][RtStNr][_SelectedHead].PartDataPcb.iFehlercode:= bcM20_St052_FlashPCBFailed;
+		
+					BDEIncCounter( FALSE, bcM20_St052_FlashPCBFailed, 1, ActOrd[MPart].ord_id, MPart);
+					BDEIncCounter( TRUE	, bcM20_St052_FlashPCBFailed, 1, ActOrd[MPart].ord_id, MPart);
+				END_IF	
+			END_IF
+			_eFlashingProgress[	_SelectedHead] := E_Flashing_Progress.DONE;
+			_swiFlash[_selectedHead] := TRUE;
+			arrCarrierData[RtNr][RtStNr][_SelectedHead].PartDataPcb.Mo20_St052.bFlashingDone:= TRUE;
+		END_IF
+
+
+	E_Flashing_Progress.ABORT:
+		_eFlashingProgress[	_SelectedHead] := E_Flashing_Progress.DONE;
+
+		IF arrCarrierData[RtNr][RtStNr][_SelectedHead].PartDataPcb.teilestatus >= srGood
+		THEN
+			xTimesError[	_selectedHead].ischl := TRUE;
+
+			arrCarrierData[RtNr][RtStNr][_SelectedHead].PartDataPcb.teilestatus := srBad;
+			arrCarrierData[RtNr][RtStNr][_SelectedHead].PartDataPcb.iFehlercode:= bcM20_St052_FlashingAborted;
+
+			BDEIncCounter( FALSE, bcM20_St052_FlashingAborted, 1, ActOrd[MPart].ord_id, MPart);
+			BDEIncCounter( TRUE	, bcM20_St052_FlashingAborted, 1, ActOrd[MPart].ord_id, MPart);
+		END_IF	
+
+
+	E_Flashing_Progress.DONE:
+		//_eFlashingProgress[	_SelectedHead] := E_Flashing_Progress.IDLE;
+	END_CASE
+END_FOR
+	
+fbProMik[HEAD_1](
+	in_StrIP				:= IP_LineController, 
+	in_uiPORT				:= 40011, 
+	in_bEstablishConnection	:= Bedieneinheit.notaus_ok, 
+	in_pDataSend			:= ADR(SendBuffer[HEAD_1]), 
+	in_pDataRcv				:= ADR(RecvBuffer[HEAD_1]), 
+	in_cbLenSend			:= INT_TO_UDINT(LEN(SendBuffer[HEAD_1])),
+	(*
+	in_cbLenRcv:= , 
+	out_uiFault=> , 
+	out_cbLenRcv=>
+	*) 
+);
+fbProMik[HEAD_1].in_bStartSendData := FALSE;
+
+fbProMik[HEAD_2](
+	in_StrIP				:= IP_LineController, 
+	in_uiPORT				:= 40012, 
+	in_bEstablishConnection	:= Bedieneinheit.notaus_ok, 
+	in_pDataSend			:= ADR(SendBuffer[HEAD_2]), 
+	in_pDataRcv				:= ADR(RecvBuffer[HEAD_2]), 
+	in_cbLenSend			:= INT_TO_UDINT(LEN(SendBuffer[HEAD_2])),
+	(*
+	in_cbLenRcv:= , 
+	out_uiFault=> , 
+	out_cbLenRcv=>
+	*) 
+);
+fbProMik[HEAD_2].in_bStartSendData := FALSE;
+
+fbProMik[HEAD_3](
+	in_StrIP				:= IP_LineController, 
+	in_uiPORT				:= 40013, 
+	in_bEstablishConnection	:= Bedieneinheit.notaus_ok, 
+	in_pDataSend			:= ADR(SendBuffer[HEAD_3]), 
+	in_pDataRcv				:= ADR(RecvBuffer[HEAD_3]), 
+	in_cbLenSend			:= INT_TO_UDINT(LEN(SendBuffer[HEAD_3])),
+	(*
+	in_cbLenRcv:= , 
+	out_uiFault=> , 
+	out_cbLenRcv=>
+	*) 
+);
+fbProMik[HEAD_3].in_bStartSendData := FALSE;
+	
+fbProMik[HEAD_4](
+	in_StrIP				:= IP_LineController, 
+	in_uiPORT				:= 40014, 
+	in_bEstablishConnection	:= Bedieneinheit.notaus_ok, 
+	in_pDataSend			:= ADR(SendBuffer[HEAD_4]), 
+	in_pDataRcv				:= ADR(RecvBuffer[HEAD_4]), 
+	in_cbLenSend			:= INT_TO_UDINT(LEN(SendBuffer[HEAD_4])),
+	(*
+	in_cbLenRcv:= , 
+	out_uiFault=> , 
+	out_cbLenRcv=>
+	*) 
+);
+fbProMik[HEAD_4].in_bStartSendData := FALSE;
+
+
+
+
+(* ____________________________ *)
+(* -- Error X-Times in a Row -- *)
+FOR _selectedHead := HEAD_1 TO HEAD_4
+DO
+	xTimesError[	_selectedHead]( cntmax := Fehlstop[E_TAB_MO_20_ST_52]	);
+	xTimesError[	_selectedHead].igut := FALSE;
+	xTimesError[	_selectedHead].ischl := FALSE;
+	
+	IF xTimesError[	_selectedHead].fehler THEN
+		CASE _selectedHead OF
+		HEAD_1:	f1[feFlashingFailed_xTimesInRowHead_1] := TRUE;
+		HEAD_2:	f1[feFlashingFailed_xTimesInRowHead_2] := TRUE;
+		HEAD_3:	f1[feFlashingFailed_xTimesInRowHead_3] := TRUE;
+		HEAD_4:	f1[feFlashingFailed_xTimesInRowHead_4] := TRUE;
+		END_CASE
+	END_IF
+END_FOR
+
+
+
+
+(* ____________________ *)
+(* -- React to Steps -- *)
+IF NOT ManualRun THEN
+	zyl2_Operate_ver_stroke.on := 	( (Schritt >= 10) AND (Schritt < 200) );
+END_IF
+
+
+(* _____________________________________ *)
+(* -- Stop Roundtable Condition-Based -- *)
+IF  NOT 	(zyl2_Operate_ver_stroke.a 	AND NOT zyl2_Operate_ver_stroke.b	AND NOT zyl2_Operate_ver_stroke.y)
+THEN 
+	F_ResetFrgRtWithText(TRUE, RtNr, RtStNr, '010MM2 §Vertical§ §not§ §in§ §base-pos.§', io_RtFreigabe);
+END_IF
+
+
+(* ______________________________________ *)
+(* -- Report Station is working on RT  -- *)
+io_RtStarts := CSETBIT32(io_RtStarts, RtStNr, bStart);
+
+
+(* _________________ *)
+(* -- Set outputs -- *)
+
+IF ManualRun THEN (* assign cylinderoutputs .y (by "AND Bedieneinheit.ventile_ok") *)
+	_052_M20_MP1_WZ3_QM1_MB1	:= 		zyl2_Operate_ver_stroke.y	AND Bedieneinheit.ventile_ok;
+	_052_M20_MP1_WZ3_QM1_MB2	:=	NOT	zyl2_Operate_ver_stroke.y	AND Bedieneinheit.ventile_ok;
+ELSE (* assign cylinderoutputs .on (by "AND Bedieneinheit.ventile_ok") *)
+	_052_M20_MP1_WZ3_QM1_MB1	:= 		zyl2_Operate_ver_stroke.on	AND Bedieneinheit.ventile_ok;
+	_052_M20_MP1_WZ3_QM1_MB2	:=	NOT	zyl2_Operate_ver_stroke.on	AND Bedieneinheit.ventile_ok;
+END_IF
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="Mo20_St52_flashing_pcb">
+      <LineId Id="589" Count="4" />
+      <LineId Id="789" Count="2" />
+      <LineId Id="960" Count="0" />
+      <LineId Id="959" Count="0" />
+      <LineId Id="792" Count="8" />
+      <LineId Id="154" Count="0" />
+      <LineId Id="595" Count="19" />
+      <LineId Id="175" Count="4" />
+      <LineId Id="2579" Count="3" />
+      <LineId Id="180" Count="2" />
+      <LineId Id="615" Count="0" />
+      <LineId Id="184" Count="1" />
+      <LineId Id="2185" Count="0" />
+      <LineId Id="186" Count="0" />
+      <LineId Id="616" Count="1" />
+      <LineId Id="188" Count="5" />
+      <LineId Id="618" Count="1" />
+      <LineId Id="209" Count="0" />
+      <LineId Id="1490" Count="3" />
+      <LineId Id="1495" Count="5" />
+      <LineId Id="1504" Count="1" />
+      <LineId Id="1698" Count="0" />
+      <LineId Id="1484" Count="0" />
+      <LineId Id="1483" Count="0" />
+      <LineId Id="210" Count="0" />
+      <LineId Id="218" Count="0" />
+      <LineId Id="620" Count="1" />
+      <LineId Id="221" Count="12" />
+      <LineId Id="622" Count="1" />
+      <LineId Id="1138" Count="2" />
+      <LineId Id="239" Count="0" />
+      <LineId Id="241" Count="3" />
+      <LineId Id="627" Count="1" />
+      <LineId Id="247" Count="3" />
+      <LineId Id="2583" Count="7" />
+      <LineId Id="2604" Count="0" />
+      <LineId Id="2592" Count="4" />
+      <LineId Id="2605" Count="0" />
+      <LineId Id="2598" Count="4" />
+      <LineId Id="2606" Count="0" />
+      <LineId Id="251" Count="6" />
+      <LineId Id="2607" Count="3" />
+      <LineId Id="1515" Count="0" />
+      <LineId Id="259" Count="2" />
+      <LineId Id="263" Count="0" />
+      <LineId Id="2613" Count="1" />
+      <LineId Id="2629" Count="78" />
+      <LineId Id="2722" Count="78" />
+      <LineId Id="2815" Count="78" />
+      <LineId Id="2908" Count="75" />
+      <LineId Id="3717" Count="2" />
+      <LineId Id="3792" Count="34" />
+      <LineId Id="2611" Count="0" />
+      <LineId Id="3827" Count="35" />
+      <LineId Id="2612" Count="0" />
+      <LineId Id="264" Count="5" />
+      <LineId Id="271" Count="0" />
+      <LineId Id="1857" Count="0" />
+      <LineId Id="272" Count="5" />
+      <LineId Id="279" Count="0" />
+      <LineId Id="2992" Count="0" />
+      <LineId Id="280" Count="0" />
+      <LineId Id="3464" Count="0" />
+      <LineId Id="2985" Count="6" />
+      <LineId Id="281" Count="0" />
+      <LineId Id="283" Count="0" />
+      <LineId Id="3863" Count="1" />
+      <LineId Id="4650" Count="2" />
+      <LineId Id="4665" Count="0" />
+      <LineId Id="4667" Count="16" />
+      <LineId Id="4666" Count="0" />
+      <LineId Id="4649" Count="0" />
+      <LineId Id="2016" Count="0" />
+      <LineId Id="4339" Count="0" />
+      <LineId Id="4337" Count="0" />
+      <LineId Id="3898" Count="0" />
+      <LineId Id="4342" Count="1" />
+      <LineId Id="4340" Count="0" />
+      <LineId Id="4338" Count="0" />
+      <LineId Id="3901" Count="0" />
+      <LineId Id="4654" Count="2" />
+      <LineId Id="4700" Count="0" />
+      <LineId Id="4702" Count="16" />
+      <LineId Id="4701" Count="0" />
+      <LineId Id="3902" Count="0" />
+      <LineId Id="4351" Count="5" />
+      <LineId Id="3899" Count="0" />
+      <LineId Id="3924" Count="1" />
+      <LineId Id="4658" Count="2" />
+      <LineId Id="4719" Count="0" />
+      <LineId Id="4721" Count="16" />
+      <LineId Id="4720" Count="0" />
+      <LineId Id="4657" Count="0" />
+      <LineId Id="4364" Count="5" />
+      <LineId Id="3912" Count="0" />
+      <LineId Id="3935" Count="1" />
+      <LineId Id="4662" Count="2" />
+      <LineId Id="4738" Count="0" />
+      <LineId Id="4740" Count="16" />
+      <LineId Id="4739" Count="0" />
+      <LineId Id="4661" Count="0" />
+      <LineId Id="4377" Count="5" />
+      <LineId Id="3900" Count="0" />
+      <LineId Id="285" Count="3" />
+      <LineId Id="2993" Count="0" />
+      <LineId Id="290" Count="2" />
+      <LineId Id="2994" Count="0" />
+      <LineId Id="2997" Count="5" />
+      <LineId Id="3004" Count="6" />
+      <LineId Id="3012" Count="6" />
+      <LineId Id="3020" Count="6" />
+      <LineId Id="2996" Count="0" />
+      <LineId Id="2995" Count="0" />
+      <LineId Id="293" Count="0" />
+      <LineId Id="1516" Count="0" />
+      <LineId Id="1518" Count="3" />
+      <LineId Id="3028" Count="5" />
+      <LineId Id="1523" Count="0" />
+      <LineId Id="1517" Count="0" />
+      <LineId Id="294" Count="0" />
+      <LineId Id="3035" Count="14" />
+      <LineId Id="3034" Count="0" />
+      <LineId Id="3966" Count="0" />
+      <LineId Id="3968" Count="8" />
+      <LineId Id="5007" Count="0" />
+      <LineId Id="3977" Count="10" />
+      <LineId Id="3993" Count="4" />
+      <LineId Id="3992" Count="0" />
+      <LineId Id="3988" Count="0" />
+      <LineId Id="4626" Count="1" />
+      <LineId Id="4625" Count="0" />
+      <LineId Id="3989" Count="2" />
+      <LineId Id="3967" Count="0" />
+      <LineId Id="3999" Count="9" />
+      <LineId Id="5008" Count="0" />
+      <LineId Id="4009" Count="16" />
+      <LineId Id="4629" Count="1" />
+      <LineId Id="4628" Count="0" />
+      <LineId Id="4026" Count="3" />
+      <LineId Id="3998" Count="0" />
+      <LineId Id="4031" Count="9" />
+      <LineId Id="5009" Count="0" />
+      <LineId Id="4041" Count="16" />
+      <LineId Id="4632" Count="1" />
+      <LineId Id="4631" Count="0" />
+      <LineId Id="4058" Count="3" />
+      <LineId Id="4030" Count="0" />
+      <LineId Id="4063" Count="9" />
+      <LineId Id="5010" Count="0" />
+      <LineId Id="4073" Count="16" />
+      <LineId Id="4635" Count="1" />
+      <LineId Id="4634" Count="0" />
+      <LineId Id="4090" Count="3" />
+      <LineId Id="4062" Count="0" />
+      <LineId Id="295" Count="3" />
+      <LineId Id="3050" Count="0" />
+      <LineId Id="300" Count="0" />
+      <LineId Id="302" Count="1" />
+      <LineId Id="3469" Count="0" />
+      <LineId Id="4336" Count="0" />
+      <LineId Id="3470" Count="1" />
+      <LineId Id="3468" Count="0" />
+      <LineId Id="3472" Count="3" />
+      <LineId Id="304" Count="1" />
+      <LineId Id="3236" Count="0" />
+      <LineId Id="306" Count="0" />
+      <LineId Id="3053" Count="6" />
+      <LineId Id="4999" Count="0" />
+      <LineId Id="5006" Count="0" />
+      <LineId Id="5004" Count="0" />
+      <LineId Id="3061" Count="81" />
+      <LineId Id="3238" Count="0" />
+      <LineId Id="3144" Count="91" />
+      <LineId Id="3051" Count="1" />
+      <LineId Id="307" Count="0" />
+      <LineId Id="634" Count="1" />
+      <LineId Id="310" Count="0" />
+      <LineId Id="312" Count="0" />
+      <LineId Id="314" Count="2" />
+      <LineId Id="1308" Count="2" />
+      <LineId Id="2351" Count="0" />
+      <LineId Id="1311" Count="1" />
+      <LineId Id="631" Count="0" />
+      <LineId Id="323" Count="3" />
+      <LineId Id="632" Count="0" />
+      <LineId Id="327" Count="0" />
+      <LineId Id="633" Count="0" />
+      <LineId Id="329" Count="6" />
+      <LineId Id="2186" Count="0" />
+      <LineId Id="337" Count="1" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

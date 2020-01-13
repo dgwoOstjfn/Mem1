@@ -1,0 +1,1544 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.16">
+  <POU Name="M20" Id="{d0626cf6-3004-4ffb-9fe4-0dbc2c9730be}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK M20
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<CHANGES>
+Bei jeder Änderung bitte Datum, Versionierung, Namenskürzel und Änderungsbeschreibung eintragen!
+
+Datum 		|	Version	|	Autor	|	Beschreibung		
+--------------------------------------------------------------------------------
+2017-07-04	|	1.00	|	SBA		|	Initial Version
+</CHANGES>
+
+*)
+
+(* _______________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	MoNr:				INT := 1;
+	M_Zentrale: 		INT := 1;
+	TxtAnzHilfs: 		INT := C_TXT_ANZ_1; 	(* Nr. of Textdisplay *)
+	TxtAnzHaupt:		INT := C_TXT_ANZ_M20;	(* Nr. of Textdisplay *)
+	MPart:				INT := 1;
+	CPart:				INT := 1;	(* Counter-Part *)
+END_VAR
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+	
+	(* == General == *)
+	i:								INT;
+	z1:								ZAEHLER; (* FB for processing countx *)
+	ft_BDE_Laeuft:					F_TRIG;
+	dwDebug:						DWORD;
+	uz_ps:							ton;		(*DWOCOM*)
+	uz_ps_2:							ton;
+	
+	(* == Lamptest == *)	
+	rt_Lampentest:					R_TRIG;
+	ton_Lampentest:					TON;
+
+		
+	(* == Emptying == *)
+	
+	leergefahren: 					BOOL;
+	leerfahren:						BOOL;
+	s_leer:							BOOL;
+	rtrigAnlageLeerfahren: 			R_TRIG;
+	ftrigAnlageLeerfahren: 			F_TRIG;
+	(*
+	mpart_M20: 						Mpart_leer_ST; (* Leerfahren für Maschinenteil *)
+	mpart_M30: 						Mpart_leer_ST; (* Leerfahren für Maschinenteil *)
+	mpart_M40: 						Mpart_leer_ST; (* Leerfahren für Maschinenteil *)
+	*)
+
+	
+	(* == Machine Illumination == *)
+	s_Maschinenbeleuchtung:			BOOL:=FALSE;
+	rtMaschinenbeleuchtung:			R_TRIG;
+	m_bMaschinenbeleuchtung:		BOOL:=FALSE;
+
+
+	(* == Signal Tower == *)
+	Fault,Waiting,Warning:			BOOL:=FALSE;
+	
+	
+	(* == Central and User Interface == *)
+	motorschutz						:BOOL;
+	schutzkontrolle					:BOOL;
+	schutzstrom						:BOOL;
+	hauptstr						:BOOL;
+	schutz							:BOOL;
+
+	ztse							:BOOL;
+	k_auto							:BOOL;
+	k_ueber							:BOOL;
+	s_zustimm						:BOOL;
+
+	s_R_Haupt						:BOOL; (* main user control: button reset error (R) as normally open contact button  *)
+	s_I_Haupt						:BOOL; (* main user control: button on  (I) as normally open contact button *)
+	s_0_Haupt						:BOOL; (* main user control: button off (O) as normally closed contact button *)
+	s_HandAuto						:BOOL; (* main user control: manual / auto as button *)
+	s_Ueber							:BOOL; (* main user control: ovverride guard 1 = overriden *)
+	s_R_Neben						:BOOL; (* secondary user control: button reset error (R) as normally open contact button *)
+	s_I_Neben						:BOOL; (* secondary user control: button Ein (I) as normally open contact button *)
+	s_0_Neben						:BOOL; (* secondary user control: button Aus (O) as normally closed contact button *)
+	s_NotEntr						:BOOL; (* button reset emergency stop *)
+	s_Lampentest					:BOOL; (* button lamp test *)
+	s_TasterSchutztuer				:BOOL; (* button unlock door *)
+
+	notaus							:BOOL;
+	notentr							:BOOL;
+	bt_hauptventil					:BOOL;
+	
+	
+	(* == Central Cleaning - Vacuum Cleaning and Ionisation Unit == *)
+	tofCentralCleaningRequestOn		:TOF;
+	tofCentralCleaningRequestOn_40		:TOF;
+	tonCentralCleaningIsRunning		:TON;
+	
+	ixIonizationUnitReady			:BOOL:=FALSE;
+	ixIonizationUnitError			:BOOL:=FALSE;
+	ixVacuumcleanerInOperate		:BOOL:=FALSE;
+	ixVacuumcleanerFilterFull		:BOOL:=FALSE; (* extraction filter 100% *)
+	
+	qxIonizationOn					:BOOL:=FALSE;
+	qxIonizationOn_40				:BOOL:=FALSE;
+	qxVacuumcleanerOn				:BOOL:=FALSE;
+	
+	tonIonizationOn					:TON;
+	tonVacuumcleanerOn				:TON;
+	tofVacuumcleanerOn				:TOF;
+	
+	
+	(* == Roundtable Shiftregisters == *)
+	(*aRtRegister_100					:ARRAY[1..6] OF ARRAY[1..4]  OF DataTeil_pcb; 	// parts from roundtable 100
+	aRtRegister_200					:ARRAY[1..8] OF ARRAY[1..2]	 OF DataTeil; 	// parts from roundtable 200 
+	tempRegister1					:DataTeil_pcb;
+	tempRegister2					:DataTeil_pcb;
+	tempRegister3					:DataTeil_pcb;
+	tempRegister4					:DataTeil_pcb;
+	tempRegister1_RT2				:DataTeil;
+	tempRegister2_RT2				:DataTeil;*)
+	fbSetCarrierRT100				:FB_Register_SrSetCarrier;
+	fbSetCarrierRT200				:FB_Register_SrSetCarrier;
+	dwRtStarts						:ARRAY[RT_M20_100..RT_M20_200] OF DWORD; // flag-field for stations working at roundtable
+	dwRtFreigabe					:ARRAY[RT_M20_100..RT_M20_200] OF DWORD; // flag-field for permission for roundtable to move 
+	dwRtFault						:ARRAY[RT_M20_100..RT_M20_200] OF DWORD;
+	dwRtWaiting						:ARRAY[RT_M20_100..RT_M20_200] OF DWORD;
+	dwRtWarning						:ARRAY[RT_M20_100..RT_M20_200] OF DWORD;
+
+	bFlashingTableFreigabe			:BOOL; (* Flag to protect crash when turning of flashing table by setting FALSE during vertical down at flashing area *)
+	FlashingTableRegister			:ARRAY[1..2] OF ARRAY[1..4] OF DataTeil; (* Flashing Table Register - 4 Parts at each side of Table / 2 Sides of the Table *)
+
+
+	
+	(* == Workpiececarrier Circulation Information == *)
+	dwWpcFault						:DWORD; // bit array (dword) representing error at wpc-location
+	dwWpcWaiting					:DWORD; // bit array (dword) representing waiting at wpc-location
+	dwWpcWarning					:DWORD; // bit array (dword) representing warning at wpc-location
+	
+	
+	bRt100_RtEmpty					:BOOL;
+	bRt100_StopRoundTable			:BOOL;
+
+	bRt200_RtEmpty					:BOOL;
+	bRt200_StopRoundTable			:BOOL;
+	
+END_VAR
+
+
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+	(* == Central == *)	
+	Zentrale:						Zentrale_Modul_2015; 				// Modulzentrale
+	Zusatzzentrale:					Zusatzzentrale; 					// Addon to Zentrale 
+	fbDoorsAndEStop:				FB_DoorsAndEStop;					// Text for Doors/E-Stops
+	Temperatur:						Zentrale_NOT_TUER_TEMP_KLIMA_MSS;	// Anzeige Temperaturwächter
+	fbBusdiag:						FB_Busdiagnose_237043;				// Busdiagnose
+	vofaGefaehrlicheBewegungen:		FB_Festo_VOFA_L26;					// Abschaltung gefährliche Bewegungen 
+	TypwechselMPart1:				TYPWECHSELM;						// Baustein zur Auftragsübernahme
+
+
+	
+	(* == Roundtables == *)
+	RT_100							:FB_Weiss_EF2;
+	RT_200							:FB_Weiss_EF2;
+	
+	fbCycletimeRT_100:				FB_StationszeitenRundtisch;			// Measurement Cycle Time of Roundtable
+	fbCycletimeRT_200:				FB_StationszeitenRundtisch;			// Measurement Cycle Time of Roundtable
+	
+		
+	(* == Stations == *)
+	St10_Feeding_the_Housing				:Mo20_St10_feed_the_housing;
+	St10_transfer_the_housing				:Mo20_St10_transfer_the_housing;
+	
+	St20_plasma_cleaning_for_housing		:Mo20_St20_plasma_cleaning_for_housing;
+	
+	St50_transfer_and_assemble_the_pcb		:Mo20_St50_transfer_and_assemble_the_pcb;
+	//St50_transfer_and_assemble_the_pcb_RT2	:Mo20_St50_transfer_and_assemble_the_pcb_RT2;
+	
+	St51_transfer_the_pcb_to_RT1			:Mo20_St51_transfer_the_pcb_to_RT1;
+	
+	St52_flashing_pcb						:Mo20_St52_flashing_pcb;
+	
+	St53_feed_Control						:Mo20_St53_FeedControlSystemFilm;
+	St53_feeding_foil						:Mo20_St53_feeding_foil;	
+	St53_pnp_and_assembling_foil			:Mo20_St53_pnp_and_assembling_foil;
+	St53_vision_sensor						:Mo20_St53_vision_sensor;
+	
+	St55_cleaning_and_empty_check			:Mo20_St55_cleaning_and_empty_check;
+	St56_Pick_and_Place_RT1					:Mo20_St56_Pick_and_Place_RT1;
+	
+	//St70_output_good_and_bad_parts		:Mo20_St70_output_good_and_bad_parts;   DWOCOM updated to new vision
+	St70_output_OK_NOK_parts				:Mo20_St70_output_OK_NOK_parts;
+	
+	St80_cleaning_and_empty_check_1			:Mo20_St80_cleaning_and_empty_check_1;
+	
+	St90_fixture_cleaning_and_empty_WPC		:Mo20_St90_fixture_cleaning_and_empty_WPC;
+
+	
+	
+
+	(* == Workpiece Carrier Circulation == *)	
+	M20_WPC							:M20_WPC;
+	io_Statinterface1: INT;
+	iWPCNr				:INT:=1;				//DWOCOM
+END_VAR
+
+
+(* ____________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrEndl,Nr:=1651, Txt:='           -TB1'),
+	(* Error 02 *)		(Prio := ErrStau,Nr:=1652, Txt:='           -TB1'),
+	(* Error 03 *)		(Prio := ErrEndl,Nr:=1653, Txt:='           -VQ1'),
+	(* Error 04 *)		(Prio := ErrZyl, Nr:=1654, Txt:='           -VQ1'),
+	(* Error 05 *)		(Prio := ErrFw,  Nr:=1655, Txt:='           -VQ1'),
+	(* Error 06 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/06            '),
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/10            '),
+	(* Error 11 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/11            '),
+	(* Error 12 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/12            '),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13            '),
+	(* Error 14 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/14            '),
+	(* Error 15 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/15            '),
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/16            ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ4;
+END_VAR
+VAR CONSTANT
+	feIonisationNotReady			:INT := 01;
+	feIonisationError				:INT := 02;
+	feVacuumcleaningNotInOperate	:INT := 03;
+	feVacuumcleaningFktInOperate	:INT := 04;
+	feVacuumcleaningFilterFull		:INT := 05;
+END_VAR
+(* 
+MV,1651,*************** §wait for§ §Ionisation§ §ready§
+MV,1652,*************** §Ionisation§ §is reporting§ §error§
+MV,1653,*************** §wait for§ §vacuum cleaning§ §operating§
+MV,1654,*************** §vacuum-cleaner§ §reporting§ §operating§
+MV,1654,§without§ §start-signal§
+MV,1655,*************** §vacuum-cleaner§ §filter§ §full§
+*)
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* _________________________________________ *)
+(* Initialisation of Step Sequence Diagnosis *)
+InitModul('§Module§ ++M20');
+
+
+(* _________________________ *)
+(* Enable Keba Panel Entries *)
+gKebaAktPanel[PANEL_M20] := TRUE;		
+gKebaAktPanel[PANEL_M30] := FALSE;
+gKebaAktPanel[PANEL_M40] := FALSE;
+
+
+(* ______________________________ *)
+(* Read Configuration By INI File *)
+(* not needed
+fbReadModuleConfig(
+	MoNr			:= MoNr,
+	StNr			:= 0,
+	Bedieneinheit	:= mz[M_Zentrale],
+	FaultID			:= FaultID_M20,
+	DisplayNr		:= TxtAnzHilfs,
+);
+*)
+
+
+(* _____________ *)
+(* Bus Diagnosis *)
+
+fbBusdiag(
+	FaultID			:= FaultID_Busdiag,
+	DisplayNr		:= TxtAnzHaupt,
+	StatString		:= ''	);
+	
+	
+// turn off all lamps before processing the module 
+TurnOffLamps();
+
+(* _____________________ *)
+(* Process Safety Inputs *)
+
+arrEmergencyClosed[MoNr] := _20NOTZU; 
+
+arrDoorCircuitClosed[MoNr] := _20SCHZU1;
+
+arrDoor[MoNr,1] := _SK1_M20_C501_KF1_Y1;
+arrDoor[MoNr,2] := _SK1_M20_C501_KF1_Y2;
+arrDoor[MoNr,3] := _SK1_M20_C501_KF1_Y3;
+arrDoor[MoNr,4] := _SK1_M20_C501_KF1_Y4;
+
+
+(* Potential ZTNA *)
+arrEmergencyActive[MoNr] := _20NOTAK;
+
+(* Potential ZTSB *)
+arrMainCircuitActive[MoNr] := _20ZTSB1;
+
+(* Doors bridged *)
+arrGuardBypass[MoNr,1] := _20KBR1;
+
+(* Enabling button *)
+arrConfirmButton[MoNr,1] := _20ZTST1;
+
+(* Potential ZTSE *)
+arrAktorsEnabled[MoNr] := (_20ZTSB1 AND _20ZTSE1) OR _20ZTSC1;
+
+(* Doors closed *)
+arrDoorCircuitClosed[MoNr] := _20SCHZU1;
+
+(* Potential ZTSC *)
+arrDoorCircuitActive[MoNr] := _20ZTSC1;
+
+(* Manualmode activated *)
+arrManualActivated[MoNr] := arrManualMode[MoNr] AND arrEmergencyActive[MoNr];
+
+
+(* ____________________ *)
+(* Process User Buttons *)
+Zentrale.s_HandAuto	:=
+		(	_M20_bCellButtons		AND (BDEButton = cActionM20_TasteHandAuto)	)
+	OR	(	_M20_bPanel1			AND gKebaDataToSps[PANEL_M20].Bedienung.Taste_HA	);
+	
+Zentrale.s_R_Haupt		:= 	(	_M20_bPanel1 AND gKebaDataToSps[PANEL_M20].Bedienung.Taste_R	);
+Zentrale.s_R_Neben		:= 	_GM1_M20_BF1_SF3_14 						
+						OR 	_GM1_M20_BF3_SF3_14
+						OR 	(BDEButton=cActionM20_TasteR);
+
+IF 			fbBusdiag.bPanelOk 
+	AND 	t_erkenn.Q 
+	AND NOT neustart 
+THEN
+
+	Zentrale.s_I_Haupt			:= 	(	_M20_bPanel1 AND gKebaDataToSps[PANEL_M20].Bedienung.Taste_I	)
+								OR	(	_M20_bPanel1 AND gKebaDataToSps[PANEL_M20].Bedienung.Taste_Einrichten );
+								
+	Zentrale.s_0_Haupt			:= 	NOT gKebaDataToSps[PANEL_M20].Bedienung.Taste_0;
+	
+	Zentrale.s_I_Neben			:= 	_GM1_M20_BF1_SF2_14					
+								OR	_GM1_M20_BF3_SF2_14;
+																
+	Zentrale.s_0_Neben			:= 	_GM1_M20_BF1_SF1					
+								AND _GM1_M20_BF3_SF1
+								AND (BDEButton<>cActionM20_Taste0);
+	
+	Zentrale.s_Lampentest		:=	gKebaDataToSps[PANEL_M20].Bedienung.Taste_Lampentest 	
+								OR 	(BDEButton = cActionM20_TasteLampentest);
+								
+	Zentrale.s_TasterSchutztuer	:= 	FALSE;
+	
+	s_Maschinenbeleuchtung		:= 	(	_M20_bPanel1 AND gKebaDataToSps[PANEL_M20].Bedienung.Taste_F4	) 
+								OR 	(	BDEButton = cActionM20_TasteBeleuchtung );
+								
+	s_leer						:= 	(	_M20_bPanel1 AND gKebaDataToSps[PANEL_M20].Bedienung.Taste_LF )
+								OR	(	_M30_bPanel1 AND gKebaDataToSps[PANEL_M30].Bedienung.Taste_LF )
+								OR	(	_M40_bPanel1 AND gKebaDataToSps[PANEL_M40].Bedienung.Taste_LF )
+								OR	(	_M20_bCellButtons AND BDEButton=cActionTasteLeerfahren	);
+ELSE
+	Zentrale.s_I_Haupt			:= FALSE;
+	Zentrale.s_0_Haupt			:= TRUE;
+
+	Zentrale.s_I_Neben			:= FALSE;
+	Zentrale.s_0_Neben			:= TRUE;
+	
+	Zentrale.s_Lampentest		:= FALSE;
+	Zentrale.s_TasterSchutztuer	:= FALSE;
+	
+	s_Maschinenbeleuchtung		:= FALSE;
+	s_leer						:= FALSE;
+END_IF
+
+
+
+
+
+(* _________________ *)
+(* -- Temperature -- *)
+Temperatur(
+	in_b01			:= _SPV_M20_P1_BT1,
+	in_b02			:= TRUE,
+	in_str01		:= '    =SPV+P1-BT1',
+	in_str02		:= '               ',
+);
+
+
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID_M20, FAnz:= TxtAnzHaupt, EF:= Errors1, F:= f1 );
+
+Fault	:= FALSE;
+Warning := FALSE;
+Waiting := FALSE;
+FOR i := 1 TO ErrMaxBits BY 1 DO
+	IF f1[i] THEN
+		IF 		Errors1[i].Prio <= ErrZyl 			THEN Fault := TRUE;
+		ELSIF	Errors1[i].Prio <= ErrEndl 			THEN Waiting := TRUE; f1[i] := FALSE;
+		ELSIF	Errors1[i].Prio <= ErrWechselpos	THEN Warning := TRUE; f1[i] := FALSE; END_IF
+	END_IF
+END_FOR
+
+
+
+(* ______________ *)
+(* Zentrale Addon *)
+Zusatzzentrale(
+	FaultID				:= FaultID_CentralExtention,
+	BedienEinheit		:= mz[M_Zentrale],
+	DisplayNrHilfs		:= TxtAnzHilfs,
+	DisplayNrHaupt		:= TxtAnzHaupt,
+);
+
+
+(* ______________ *)
+(* -- Zentrale -- *)
+Zentrale(
+	ID						:= FaultID_M20,
+	FAnz					:= TxtAnzHaupt,
+	NOTZU					:= arrEmergencyClosed[MoNr],
+	NOTAK					:= arrEmergencyActive[MoNr],
+	ZTSB					:= arrMainCircuitActive[MoNr],
+	SCHZU					:= arrDoorCircuitClosed[MoNr],
+	ZTSC					:= arrDoorCircuitActive[MoNr],
+	ZTSE					:= arrAktorsEnabled[MoNr],	
+	TEMP_OK					:= Temperatur.out_bResult,
+	KLIMA_OK				:= TRUE,
+	VERRIEGELT 				:= mz[M_Zentrale].schutz_ok,
+	//	s_R_Haupt			:= look above
+	//	s_I_Haupt			:= look above
+	//	s_0_Haupt			:= look above
+	//	s_HandAuto			:= look above
+	s_Ueber					:= arrGuardBypass[MoNr,1],
+	in_k_ueber				:= arrGuardBypass[MoNr,1],
+	//	s_R_Neben			:= look above
+	//	s_I_Neben			:= look above
+	//	s_0_Neben			:= look above
+	s_pneu_ein_Serv			:= FALSE,
+	s_pneu_aus_Serv			:= FALSE,
+	s_anl_ein_Serv			:= FALSE,
+	s_anl_aus_Serv			:= FALSE,
+	s_NotEntr				:= Zentrale.s_I_Haupt,
+	//	s_Lampentest		:= look above
+	//	s_TasterSchutztuer	:= look above 
+	time_Schutztuer			:= T#9S,	// cycle time 5.4s => release time for safety doors has to be greater than 5.4s
+	s_rueck					:= FALSE,
+	s_zustimm				:= arrConfirmButton[MoNr,1],
+	in_k_hand				:= arrManualActivated[MoNr],
+	in_VOFA1				:= _GM1_M20_MP1_KZ2_QM1_BG1,
+	in_VOFA2				:= _GM1_M20_MP1_KZ2_QM2_BG1,
+	in_strVOFA1				:= 'GM1-KZ2-QM1-BG1',
+	in_strVOFA2				:= 'GM1-KZ2-QM2-BG1',
+	in_strNotZu				:= fbDoorsAndEStop.out_strE_Stop,
+	in_strTuer				:= fbDoorsAndEStop.out_strDoor,
+	in_strHauptventil		:= '   =GM1-KZ1-QM2',
+	in_strDruckwaechter		:= '       =GM1-BP1',
+	in_strTemp				:= Temperatur.out_str,
+	in_strKlima				:= '               ',
+
+	MSS						:= _MSS_M20,
+	in_strMSS				:= '   =PLC+P3-KF12',
+
+	in_Druckwaechter		:= _GM1_M20_MP1_KZ1_QM2_BP1,
+	in_Hauptventil_ok		:= _GM1_M20_MP1_KZ1_QM2_X1,
+	stationsfehler			:= ((FehlerM[MoNr] 		AND 2#11111111111111111111111111111111) <> 0) OR Fault,
+	stationsendlagen		:= ((EndlagenM[MoNr] 	AND 2#11111111111111111111111111111111) <> 0) OR Waiting,
+	stationswarnungen		:= ((WarnungM[MoNr] 	AND 2#11111111111111111111111111111111) <> 0) OR Warning,
+	stationsschutz			:= (SchutzM[MoNr] 		AND 2#11111111111111111111111111111111) <> 0,
+	zyklusende				:= (ZyklusEndeM[MoNr] 	AND 2#11111111111111111111111111111111) = 2#11111111111111111111111111111111,
+	fehlerstop				:= fbBusdiag.out_bModulStop,
+	fehlergrd				:= FALSE,
+	
+	i_laeuft				:= 	RT_100.out_bStart
+							OR	RT_200.out_bStart
+							OR	g_arrWtPlace[	cWpcPlaceM20_AtSt070_1	]._bInitImpulseNextWpc
+							OR	g_arrWtPlace[	cWpcPlaceM20_AtSt070_2	]._bInitImpulseNextWpc
+							OR	g_arrWtPlace[	cWpcPlaceM20_AtSt090	]._bInitImpulseNextWpc,
+								
+	leerfahren				:= mz[M_Zentrale].mpart[MPart].hm_leer,
+	bDisableNebenRIO		:= false, (* PBAIBN *)
+	m_para					:= modul_parameter.Zentr_Struct[M_Zentrale],
+	BedienEinheit			:= mz[M_Zentrale],
+	out_k_vzschutz			=> arrResetDoorCircuit[MoNr],
+	out_hauptventil1		=> _GM1_M20_MP1_KZ1_QM2_MB1,
+	out_hauptventil2		=> _GM1_M20_MP1_KZ1_QM2_MB2,
+	out_hauptventil_reset	=> _GM1_M20_P1_KF1,
+	out_k_NotEntr			=> arrResetEmergency[MoNr],
+	out_k_Hand				=> arrManualMode[MoNr],
+	out_h_HandAuto			=> ,	// there is none
+	//	out_h_I_Haupt		look below
+	//	out_h_O_Haupt		look below
+	//	out_h_R_Haupt		look below
+	//	out_h_I_Neben		look below
+	//	out_h_O_Neben		look below
+	//	out_h_R_Neben		look below
+	out_h_Schutztueren		=> ,	// there is none
+	out_h_NotEntr			=> ,	// there is none
+	out_h_Rot				=> _GM1_M20_MP1_AF1_PF3,
+	out_h_Gelb				=> _GM1_M20_MP1_AF1_PF2,
+	out_h_Gruen				=> _GM1_M20_MP1_AF1_PF1,
+	//	out_h_Beleuchtung	different solution below
+	out_Betriebsstunden		=> _PLC_M20_P1_PG1,
+	out_SafetyBridged		=> ,
+);
+_20ZH_LOCK1 := Zentrale.out_k_Schutztuer;
+
+(* Button Lamp´s (I) *)
+
+_GM1_M20_BF1_SF2_X1 := Zentrale.out_h_I_Neben AND _M20_bCellButtons;
+_GM1_M20_BF3_SF2_X1	:= Zentrale.out_h_I_Neben AND _M20_bCellButtons;
+
+(* Button Lamp´s (R) *)
+
+_GM1_M20_BF1_SF3_X1 := Zentrale.out_h_R_Neben AND _M20_bCellButtons;
+_GM1_M20_BF3_SF3_X1	:= Zentrale.out_h_R_Neben AND _M20_bCellButtons;
+
+(* Manual mode enabled *)
+_20KHA1ON := arrManualMode[MoNr];
+
+(* Reset emergency stop *)
+_20NAENTR := arrResetEmergency[MoNr];
+
+(* Reset door circuit *)
+_20VSCHZ1 := arrResetDoorCircuit[MoNr];
+
+(* ____________________________ *)
+(* -- Main VOFA Safety Valve -- *)
+(*=> Main VOFA is now controlled by .ventile_OK. Sensores are monitored by ZENTRALE! 
+(* PZ-Luft mit FB_VOFA_ZTSE geschaltet - Steuerluft- *) *)
+_GM1_M20_MP1_KZ2_QM1_MB1 := mz[M_Zentrale].ventile_ok;
+_GM1_M20_MP1_KZ2_QM2_MB1 := mz[M_Zentrale].ventile_ok;
+
+
+// machine illumination
+rtMaschinenbeleuchtung( CLK := s_Maschinenbeleuchtung );
+IF rtMaschinenbeleuchtung.Q THEN
+	m_bMaschinenbeleuchtung := NOT m_bMaschinenbeleuchtung;
+END_IF
+_SPV_M20_P1_QA1 := m_bMaschinenbeleuchtung;
+
+
+
+
+// Reset Station´s errors
+FehlerM[MoNr]	:= 0;
+WarnungM[MoNr]	:= 0;
+EndlagenM[MoNr]	:= 0;
+
+// use bit 31 from ...[MoNr] from module for wpc-circulation
+IF dwWpcFault 	<> 0 THEN FehlerM[	MoNr].31 := 1; dwWpcFault := 0;		END_IF
+IF dwWpcWarning <> 0 THEN WarnungM[	MoNr].31 := 1; dwWpcWarning := 0;	END_IF	
+IF dwWpcWaiting <> 0 THEN EndlagenM[MoNr].31 := 1; dwWpcWaiting := 0;	END_IF
+
+
+// use bit 1 from ...[MoNr] for roundtable 100
+IF dwRtFault[	RT_M20_100] <> 0 THEN FehlerM[	MoNr].1  := 1; dwRtFault[	RT_M20_100]	:= 0;	END_IF
+IF dwRtWarning[	RT_M20_100] <> 0 THEN WarnungM[	MoNr].1  := 1; dwRtWarning[	RT_M20_100]	:= 0;	END_IF	
+IF dwRtWaiting[	RT_M20_100] <> 0 THEN EndlagenM[MoNr].1  := 1; dwRtWaiting[	RT_M20_100]	:= 0;	END_IF
+
+// use bit 2 from ...[MoNr] for roundtable 200
+IF dwRtFault[	RT_M20_200] <> 0 THEN FehlerM[	MoNr].2  := 1; dwRtFault[	RT_M20_200] := 0;	END_IF
+IF dwRtWarning[	RT_M20_200] <> 0 THEN WarnungM[	MoNr].2  := 1; dwRtWarning[	RT_M20_200] := 0;	END_IF	
+IF dwRtWaiting[	RT_M20_200] <> 0 THEN EndlagenM[MoNr].2  := 1; dwRtWaiting[	RT_M20_200] := 0;	END_IF
+
+
+(* no dangerous movements in M20
+// Vofa for dangerous movements
+vofaGefaehrlicheBewegungen(
+	m					:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_VOFA_ZTSC,
+	DisplayNr			:= TxtAnzHaupt,
+	in_bEnable			:= mz[M_Zentrale].hauptventil AND mz[M_Zentrale].schutz_ok,	(* Pneumatik ein UND Schutz geschlossen*)
+	in_bFunktionstest	:= Neustart,
+	in_ixDruckwaechter	:= _GM1_M01_KZ4_QM2_BP1,
+	in_sDruck			:= '       -KZ4-BP1',
+	in_ixSensor_1		:= _GM1_M01_KZ3_QM1_BG1,
+	in_ixSensor_2		:= _GM1_M01_KZ3_QM2_BG1,
+	in_sVentil_1		:= '       -KZ3-QM1',
+	in_sVentil_2		:= '       -KZ3-QM2',
+	out_qxVentil_1		=> _GM1_M01_KZ3_QM1_MB1,
+	out_qxVentil_2		=> _GM1_M01_KZ3_QM2_MB1,
+);
+*)
+
+// flags for control of guard lock
+ZyklusEndeM[MoNr] 	:= 2#11111111111111111111111111111111;
+SchutzM[MoNr]		:= 0;
+
+
+(* reset "working in progress flag" from all station´s after processing info *)
+IF StartsM[MoNr]= 0 AND FreigabeM[MoNr]<>16#FFFF_FFFF THEN
+	dwDebug:=FreigabeM[MoNr];
+END_IF
+FreigabeM[MoNr] 	:= 2#11111111111111111111111111111111;
+
+(* Starts Rundschalttisch immer rücksetzen *)
+StartsM[MoNr]		:= 0;
+ 
+
+(* _________________________________________________ *)
+(* --  C E N T R A L   C L E A N I N G   U N I T  -- *)
+
+// read inputs for central cleaning unit
+ixIonizationUnitReady	:= _GM1_M20_MP1_TB1_X2_2;
+ixIonizationUnitError	:= _GM1_M20_MP1_TB1_X2_4;
+
+ixVacuumcleanerInOperate	:= _GM1_M20_MP1_VQ1_XEXT_14;
+ixVacuumcleanerFilterFull	:= _GM1_M20_MP1_VQ1_XEXT_18;
+
+tofCentralCleaningRequestOn( IN := g_bCentralCleaningRequestOn, PT := T#2M ); (* process request with timer off delay *)
+tofCentralCleaningRequestOn_40( IN := g_bCentralCleaningRequestOn_40, PT := T#2M ); (* process request with timer off delay *)
+g_bCentralCleaningRequestOn := FALSE; (* reset request after processing *)
+g_bCentralCleaningRequestOn_40 := FALSE; (* reset request after processing *)
+
+qxIonizationOn 		:= tofCentralCleaningRequestOn.Q AND mz[M_Zentrale].notaus_ok;
+qxIonizationOn_40 	:= tofCentralCleaningRequestOn_40.Q AND mz[4].notaus_ok;
+qxVacuumcleanerOn	:= (tofCentralCleaningRequestOn.Q AND mz[M_Zentrale].notaus_ok) OR (tofCentralCleaningRequestOn_40.Q AND mz[4].notaus_ok);
+
+tonCentralCleaningIsRunning( IN := qxVacuumcleanerOn AND ixIonizationUnitReady AND ixVacuumcleanerInOperate, PT := T#3S ); // Timer on-delay for central cleaning is running
+g_bCentralCleaningRunning := tonCentralCleaningIsRunning.Q;
+g_bCentralCleaningRunning := NOT immer0;
+
+// compare feedback signals to control signals
+tonIonizationOn( 		IN 	:= qxIonizationOn, 		PT := T#5S );
+tonVacuumcleanerOn (	IN 	:= qxVacuumcleanerOn, 	PT := T#5S );
+tofVacuumcleanerOn(		IN	:= qxVacuumcleanerOn,	PT := T#5S );
+
+IF immer0 THEN
+IF NOT tofVacuumcleanerOn.Q						// timer off delay for control-signal 
+AND ixVacuumcleanerInOperate THEN				// vacuum-cleaner reporting still "in operate"
+	f1[feVacuumcleaningFktInOperate] := TRUE;	// => error with signal "in operate"
+END_IF
+f1[feIonisationNotReady] 			:= mz[M_Zentrale].anl_ein AND tonIonizationOn.Q 	AND NOT ixIonizationUnitReady;
+f1[feIonisationError]				:= mz[M_Zentrale].anl_ein AND tonIonizationOn.Q 	AND 	ixIonizationUnitError;
+f1[feVacuumcleaningNotInOperate]	:= mz[M_Zentrale].anl_ein AND tonVacuumcleanerOn.Q	AND	NOT	ixVacuumcleanerInOperate;
+f1[feVacuumcleaningFilterFull]		:= mz[M_Zentrale].anl_ein AND tonVacuumcleanerOn.Q	AND 	ixVacuumcleanerFilterFull;
+END_IF
+
+// set outputs for central cleaning unit 
+_GM1_M20_P1_QA2 		:= qxIonizationOn;
+_GM1_M40_P1_QA2 		:= qxIonizationOn_40;
+_GM1_M20_C211_KF1  	    := qxVacuumcleanerOn;
+
+(* _______________________________________________________________ *)
+(* --  W O R K P I E C E C A R R I E R   C I R C U L A T I O N  -- *)
+M20_WPC(							
+	MoNr				:= MoNr, 
+	BedienEinheit		:= mz[M_Zentrale], 
+	DisplayNr			:= TxtAnzHaupt,
+
+	io_dwWpcFault		:= dwWpcFault,
+	io_dwWpcWaiting		:= dwWpcWaiting,
+	io_dwWpcWarning		:= dwWpcWarning,
+);
+
+
+
+
+
+
+
+
+
+
+// /////////////////////////////
+// Roundtable Allowed to work //
+// /////////////////////////////
+// Roundtable 100 /////////////////////////////////////////////////////////////////////////////
+bRt100_RtEmpty		:=	(		(arrCarrierData[RT_M20_100][1][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][1][2].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][1][3].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][1][4].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][2][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][2][2].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][2][3].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][2][4].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][3][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][3][2].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][3][3].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][3][4].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][4][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][4][2].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][4][3].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][4][4].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][5][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][5][2].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][5][3].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_100][5][4].PartData.teilestatus <= srEmpty)
+						);
+
+bRt100_StopRoundTable := 	bRt100_RtEmpty  AND mz[M_Zentrale].mpart[1].hm_leer;
+
+
+
+// Roundtable 200 /////////////////////////////////////////////////////////////////////////////
+bRt200_RtEmpty		:=	( 		(arrCarrierData[RT_M20_200][1][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_200][1][2].PartData.teilestatus <= srEmpty)
+							AND	(arrCarrierData[RT_M20_200][2][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_200][2][2].PartData.teilestatus <= srEmpty)
+							AND	(arrCarrierData[RT_M20_200][3][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_200][3][2].PartData.teilestatus <= srEmpty)
+							AND	(arrCarrierData[RT_M20_200][4][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_200][4][2].PartData.teilestatus <= srEmpty)
+							AND	(arrCarrierData[RT_M20_200][5][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_200][5][2].PartData.teilestatus <= srEmpty)
+							AND	(arrCarrierData[RT_M20_200][6][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_200][6][2].PartData.teilestatus <= srEmpty)
+						    AND	(arrCarrierData[RT_M20_200][7][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_200][7][2].PartData.teilestatus <= srEmpty)
+							AND	(arrCarrierData[RT_M20_200][8][1].PartData.teilestatus <= srEmpty)
+							AND (arrCarrierData[RT_M20_200][8][2].PartData.teilestatus <= srEmpty)
+						);
+
+							// Table is empty and emptyrun is active 
+bRt200_StopRoundTable := 	bRt100_RtEmpty  AND bRt200_RtEmpty AND mz[M_Zentrale].mpart[1].hm_leer;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(* ____________________ *)
+(* -- Roundtable 100 -- *)
+RT_100(
+	MoNr					:= MoNr,
+	StNr					:= 0,
+	RtNr					:= RT_M20_100,
+	BedienEinheit			:= mz[M_Zentrale],
+	FaultID					:= FaultID_M20_RT100,
+	DisplayNr				:= TxtAnzHaupt,
+	inStrBMK				:= 'TL1            ', // 15 digits possible
+	ixVersorgung 			:= mz[M_Zentrale].schutz_ok,
+	ixDrehrichtungUmkehr	:= TRUE,
+	in_bFreigabe			:= (dwRtFreigabe[RT_M20_100] =  16#FFFF) AND NOT bRt100_StopRoundTable,
+	in_bStart				:= dwRtStarts[	RT_M20_100]	<> 0,
+);
+
+
+(* ____________________ *)
+(* -- Roundtable 200 -- *)
+RT_200(
+	MoNr					:= MoNr,
+	StNr					:= 0,
+	RtNr					:= RT_M20_200,
+	BedienEinheit			:= mz[M_Zentrale],
+	FaultID					:= FaultID_M20_RT200,
+	DisplayNr				:= TxtAnzHaupt,
+	inStrBMK				:= 'TL2            ', // 15 digits possible
+	ixVersorgung 			:= mz[M_Zentrale].schutz_ok,
+	ixDrehrichtungUmkehr	:= false,
+	in_bFreigabe			:= (dwRtFreigabe[RT_M20_200] =  16#FFFF) AND NOT bRt200_StopRoundTable,
+	in_bStart				:= dwRtStarts[	RT_M20_200]	<> 0,
+);
+
+
+dwRtFreigabe[	RT_M20_100]	:= 16#FFFF;
+dwRtStarts[		RT_M20_100] := 0;
+
+dwRtFreigabe[	RT_M20_200]	:= 16#FFFF;
+dwRtStarts[		RT_M20_200] := 0;
+
+fbSetCarrierRT100(
+	MoNr				:= MoNr,
+	StNr				:= 21,
+	FaultID				:= FaultID_M20_RT100,
+	DisplayNr			:= TxtAnzHaupt,
+	RtNr				:= RT_M20_100,
+	TischTyp			:= E_OhneZwischenNest,
+	AnzahlAufnahmen		:= 6,
+	AufnahmeSet			:= 6,
+	in_LastInfoDelete	:= FALSE,
+	Leerfahren			:= mz[MoNr].mpart[Segment_1].hm_leer (* PBAIBN *),
+	impCheckAufnahme	:= RT_100.out_bStart,
+	impRegisterMove		:= RT_100.out_bStart,
+	CheckAwAufnahme		:= FALSE,
+	rse_AwAufnahme		:= ,
+	str_AwAufnahme		:= '',
+	CheckErsteAufnahme	:= TRUE,
+	rse_ErsteAufnahme	:= _GM1_M20_MP1_BG1,
+	str_ErsteAufnahme	:= 'GM1BG1',
+);
+
+fbSetCarrierRT200(
+	MoNr				:= MoNr,
+	StNr				:= 22,
+	FaultID				:= FaultID_M20_RT200,
+	DisplayNr			:= TxtAnzHaupt,
+	RtNr				:= RT_M20_200,
+	TischTyp			:= E_OhneZwischenNest,
+	AnzahlAufnahmen		:= 8,
+	AufnahmeSet			:= 8,
+	in_LastInfoDelete	:= FALSE,
+	Leerfahren			:= mz[MoNr].mpart[Segment_1].hm_leer (* PBAIBN *),
+	impCheckAufnahme	:= RT_200.out_bStart,
+	impRegisterMove		:= RT_200.out_bStart,
+	CheckAwAufnahme		:= FALSE,
+	rse_AwAufnahme		:= ,
+	str_AwAufnahme		:= '',
+	CheckErsteAufnahme	:= TRUE,
+	rse_ErsteAufnahme	:= _GM1_M20_MP1_BG2,
+	str_ErsteAufnahme	:= 'GM1BG2',
+);
+(*
+(* ________________________________ *)
+(* -- Shift Roundtable Registers -- *)
+IF RT_100.out_bStart THEN
+	// four nests at RT 1 ///////////////////////////////////////
+	tempRegister1 			:= aRtRegister_100[6][1];
+	tempRegister2			:= aRtRegister_100[6][2];
+	tempRegister3			:= aRtRegister_100[6][3];
+	tempRegister4			:= aRtRegister_100[6][4];
+
+	aRtRegister_100[6]		:= aRtRegister_100[5];
+	aRtRegister_100[5]		:= aRtRegister_100[4];
+	aRtRegister_100[4]		:= aRtRegister_100[3];
+	aRtRegister_100[3]		:= aRtRegister_100[2];
+	aRtRegister_100[2]		:= aRtRegister_100[1];
+	
+	aRtRegister_100[1][1]	:= tempRegister1;
+	aRtRegister_100[1][2]	:= tempRegister2;
+	aRtRegister_100[1][3]	:= tempRegister3;
+	aRtRegister_100[1][4]	:= tempRegister4;
+END_IF
+
+IF RT_200.out_bStart THEN
+	// two nests at RT 2 ///////////////////////////////////////
+	tempRegister1_RT2 		:= aRtRegister_200[8][1];
+	tempRegister2_RT2 		:= aRtRegister_200[8][2];
+	
+	aRtRegister_200[8]		:= aRtRegister_200[7];
+	aRtRegister_200[7]		:= aRtRegister_200[6];
+	aRtRegister_200[6]		:= aRtRegister_200[5];
+	aRtRegister_200[5]		:= aRtRegister_200[4];
+	aRtRegister_200[4]		:= aRtRegister_200[3];
+	aRtRegister_200[3]		:= aRtRegister_200[2];
+	aRtRegister_200[2]		:= aRtRegister_200[1];
+	
+	aRtRegister_200[1][1]	:= tempRegister1_RT2;
+	aRtRegister_200[1][2]	:= tempRegister2_RT2;
+END_IF
+*)
+
+(* _______________________ *)
+(* --  S T A T I O N S  -- *)
+
+// ////////////////////
+// Roundtable 1 ///////
+// ////////////////////
+//ST10
+St10_Feeding_the_Housing.in_bEnablePrework		:=St10_transfer_the_housing.out_bEnablePrework;
+St10_Feeding_the_Housing.in_bReadyToTakeOver	:=St10_transfer_the_housing.out_bReadyToTakeOver;
+St10_Feeding_the_Housing.in_bTakenOver			:=St10_transfer_the_housing.out_bTakenOver;
+St10_Feeding_the_Housing(
+	OrderNr:=E_TAB_MO_20_ST_10 , 
+	MoNr:= MoNr, 
+	StNr:= 010, 
+	BedienEinheit:= mz[M_Zentrale], 
+	FaultID:= FaultID_M20_St010_Feeding, 
+	DisplayNr:= TxtAnzHaupt, 
+	MPart:= MPart, 
+	RtStNr:= 1, 
+	io_RtFault:= dwRtFault[	RT_M20_200], 
+	io_RtWaiting:= dwRtWaiting[RT_M20_200], 
+	io_RtWarning:= dwRtWarning[RT_M20_200]);
+
+St10_transfer_the_housing.in_bOffering			 := St10_Feeding_the_Housing.out_bOffering ;	
+St10_transfer_the_housing.in_bOfferEnd			 := St10_Feeding_the_Housing.out_bOfferEnd ;	
+St10_transfer_the_housing.in_bPartinHandlingST50 :=St50_transfer_and_assemble_the_pcb.out_bPartinHandling;
+St10_transfer_the_housing(
+	OrderNr				:= E_TAB_MO_20_ST_10, 
+	MoNr				:= MoNr, 
+	StNr				:= 010, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St010_Transfer, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 2, 
+	RtStNr				:= 1, 
+	RtStartimpuls		:= RT_200.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_200], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_200], 
+	io_RtFault			:= dwRtFault[RT_M20_200], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_200], 
+	io_RtWarning		:= dwRtWarning[RT_M20_200], 
+);
+
+St20_plasma_cleaning_for_housing(
+	OrderNr				:= E_TAB_MO_20_ST_20, 
+	MoNr				:= MoNr, 
+	StNr				:= 020, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St020, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 2, 
+	RtStNr				:= 2, 
+	RtStartimpuls		:= RT_200.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_200], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_200], 
+	io_RtFault			:= dwRtFault[RT_M20_200], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_200], 
+	io_RtWarning		:= dwRtWarning[RT_M20_200], 
+);
+
+
+St50_transfer_and_assemble_the_pcb(
+	OrderNr				:= E_TAB_MO_20_ST_50, 
+	MoNr				:= MoNr, 
+	StNr				:= 050, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St050, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr1				:= 1, 
+	RtStNr1				:= 4, 
+	RtStartimpuls1		:= RT_100.out_bStart, 
+	io_RtStarts1		:= dwRtStarts[RT_M20_100], 
+	io_RtFreigabe1		:= dwRtFreigabe[RT_M20_100], 
+	io_RtFault1			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting1		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning1		:= dwRtWarning[RT_M20_100],
+	RtNr2				:= 2, 
+	RtStNr2				:= 5, 
+	RtStartimpuls2		:= RT_200.out_bStart, 
+	io_RtStarts2		:= dwRtStarts[RT_M20_200], 
+	io_RtFreigabe2		:= dwRtFreigabe[RT_M20_200], 
+	io_RtFault2			:= dwRtFault[RT_M20_200], 
+	io_RtWaiting2		:= dwRtWaiting[RT_M20_200], 
+	io_RtWarning2		:= dwRtWarning[RT_M20_200], 
+ );
+
+ 
+ St51_transfer_the_pcb_to_RT1.in_bPartinHandlingST50 :=St50_transfer_and_assemble_the_pcb.out_bPartinHandling;
+ St51_transfer_the_pcb_to_RT1(
+	OrderNr:= E_TAB_MO_20_ST_51, 
+	MoNr				:= MoNr, 
+	StNr				:= 051, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St051, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 1, 
+	RtStNr				:= 1, 
+	RtStartimpuls		:= RT_100.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_100], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_100], 
+	io_RtFault			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning		:= dwRtWarning[RT_M20_100],
+);
+
+St52_flashing_pcb(
+	OrderNr:= E_TAB_MO_20_ST_52, 
+	MoNr				:= MoNr, 
+	StNr				:= 052, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St052, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 1, 
+	RtStNr				:= 2, 
+	RtStartimpuls		:= RT_100.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_100], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_100], 
+	io_RtFault			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning		:= dwRtWarning[RT_M20_100],
+	//in_bFlashingReady:= , 
+	//in_bFlashingEnd:= , 
+	//out_bFlashingOK=> 
+	);
+
+St53_feed_Control.in_bStartControlFinalPosition:= St53_feeding_foil.out_bStartControlFinalPosition; 
+St53_feed_Control.in_bPartIsTakeOver:= St53_pnp_and_assembling_foil.out_bPartIsTakeOver;
+St53_feed_Control.in_bPartIsTakeOver2:= St53_pnp_and_assembling_foil.out_bPartIsTakeOver2;    
+St53_feed_Control(
+	OrderNr:= E_TAB_MO_20_ST_53_2, 
+	MoNr				:= MoNr, 
+	StNr				:= 053, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St053, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtStNr				:= 3, 
+	io_RtFault			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning		:= dwRtWarning[RT_M20_100],
+);
+
+St53_feeding_foil.in_bEnablePrework:= St53_pnp_and_assembling_foil.out_bEnablePrework;
+St53_feeding_foil.in_bFinalPositionIsReady:= St53_feed_Control.out_bFinalPositionIsReady; 
+St53_feeding_foil(
+	OrderNr				:= E_TAB_MO_20_ST_53_1, 
+	MoNr				:= MoNr, 
+	StNr				:= 053, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St053, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 1, 
+	RtStNr				:= 3, 
+	io_RtFault			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning		:= dwRtWarning[RT_M20_100],
+);
+
+St53_pnp_and_assembling_foil.in_bPartIsReadyToTakeOver := St53_feed_Control.out_bPartIsReadyToTakeOver;
+St53_pnp_and_assembling_foil.in_bVisionSensorRuns	:= St53_vision_sensor.out_bVisionSensorRuns; 
+St53_pnp_and_assembling_foil(
+	OrderNr				:= E_TAB_MO_20_ST_53_2, 
+	MoNr				:= MoNr, 
+	StNr				:= 053, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St053, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 1, 
+	RtStNr				:= 3, 
+	RtStartimpuls		:= RT_100.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_100], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_100], 
+	io_RtFault			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning		:= dwRtWarning[RT_M20_100],
+);
+
+St53_vision_sensor.in_bStartVisionSensor:= St53_pnp_and_assembling_foil.out_bStartVisionSensor; 
+St53_vision_sensor.in_byteVisionSensorJobNo := St53_pnp_and_assembling_foil.out_byteVisionSensorJobNo;
+St53_vision_sensor(
+	OrderNr				:= E_TAB_MO_20_ST_53_2, 
+	MoNr				:= MoNr, 
+	StNr				:= 053, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St053, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 1, 
+	RtStNr				:= 3, 
+	io_RtStarts			:= dwRtStarts[RT_M20_100], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_100], 
+	io_RtFault			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning		:= dwRtWarning[RT_M20_100],
+);
+
+St55_cleaning_and_empty_check(
+OrderNr				:= E_TAB_MO_20_ST_55, 
+	MoNr				:= MoNr, 
+	StNr				:= 055, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St055, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 1, 
+	RtStNr				:= 5,
+	RtStartimpuls		:= RT_100.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_100], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_100], 
+	io_RtFault			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning		:= dwRtWarning[RT_M20_100],
+);
+
+St56_Pick_and_Place_RT1(
+OrderNr				:= E_TAB_MO_20_ST_56, 
+	MoNr				:= MoNr, 
+	StNr				:= 056, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St056, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 1, 
+	RtStNr				:= 6,
+	RtStartimpuls		:= RT_100.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_100], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_100], 
+	io_RtFault			:= dwRtFault[RT_M20_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_100], 
+	io_RtWarning		:= dwRtWarning[RT_M20_100],
+);
+
+St70_output_OK_NOK_parts(
+	OrderNr				:= E_TAB_MO_20_ST_70, 
+	MoNr				:= MoNr, 
+	StNr				:= 070, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St070, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 2, 
+	RtStNr				:= 7, 
+	RtStartimpuls		:= RT_200.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_200], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_200], 
+	io_RtFault			:= dwRtFault[RT_M20_200], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_200], 
+	io_RtWarning		:= dwRtWarning[RT_M20_200], 
+	in_iWpcAdress1		:= cWpcPlaceM20_AtSt070_1, 
+	io_Statinterface1	:= g_arrStatInfo[cWpcPlaceM20_AtSt070_1], 
+	io_dwWpcFault1		:= dwWpcFault, 
+	io_dwWpcWaiting1	:= dwWpcWaiting, 
+	io_dwWpcWarning1	:= dwWpcWarning, 
+	in_iWpcAdress2		:= cWpcPlaceM20_AtSt070_2, 
+	io_Statinterface2	:= g_arrStatInfo[cWpcPlaceM20_AtSt070_2], 
+	io_dwWpcFault2		:= dwWpcFault, 
+	io_dwWpcWaiting2	:= dwWpcWaiting, 
+	io_dwWpcWarning2	:= dwWpcWarning,
+);
+
+St80_cleaning_and_empty_check_1(
+	OrderNr				:= E_TAB_MO_20_ST_80, 
+	MoNr				:= MoNr, 
+	StNr				:= 080, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St080, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 2, 
+	RtStNr				:= 8, 
+	RtStartimpuls		:= RT_200.out_bStart, 
+	io_RtStarts			:= dwRtStarts[RT_M20_200], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M20_200], 
+	io_RtFault			:= dwRtFault[RT_M20_200], 
+	io_RtWaiting		:= dwRtWaiting[RT_M20_200], 
+	io_RtWarning		:= dwRtWarning[RT_M20_200], 
+);
+
+St90_fixture_cleaning_and_empty_WPC(
+	OrderNr				:= E_TAB_MO_20_ST_90, 
+	MoNr				:= MoNr, 
+	StNr				:= 090, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M20_St090, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	in_iWpcAdress		:= cWpcPlaceM20_AtSt090, 
+	io_Statinterface	:= g_arrStatInfo[cWpcPlaceM20_AtSt090], 
+	io_dwWpcFault		:= dwWpcFault, 
+	io_dwWpcWaiting		:= dwWpcWaiting, 
+	io_dwWpcWarning		:= dwWpcWarning,
+ );
+ 
+(* PBAIBN
+// ST 110 /////////////////////////////////////////////////////////////	
+St110_PickNPlace.in_bOffering	:= St110_Feeding.out_bOffering; 
+St110_PickNPlace.in_PartData	:= St110_Feeding.out_PartData; 
+St110_PickNPlace(
+	OrderNr				:= E_TAB_MO_10_ST_110, 
+	MoNr				:= MoNr, 
+	StNr				:= 110, 
+	BedienEinheit		:= mz[M_Zentrale],
+	FaultID				:= FaultID_M10_St110_PnP, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtNr				:= 1, 
+	RtStNr				:= 1, 
+	RtStartimpuls		:= RT_100.out_bStart, 
+	io_RtRegister		:= aRtRegister_100, 
+	io_RtStarts			:= dwRtStarts[RT_M10_100], 
+	io_RtFreigabe		:= dwRtFreigabe[RT_M10_100], 
+	io_RtFault			:= dwRtFault[RT_M10_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M10_100], 
+	io_RtWarning		:= dwRtWarning[RT_M10_100], 
+);
+
+St110_Feeding.in_bEnablePrework	:= St110_PickNPlace.out_bEnablePrework; 
+St110_Feeding.in_bTakeOver		:= St110_PickNPlace.out_bTakeOver; 
+St110_Feeding(
+	OrderNr				:= E_TAB_MO_10_ST_110, 
+	MoNr				:= MoNr, 
+	StNr				:= 110, 
+
+	BedienEinheit		:= mz[M_Zentrale], 
+	FaultID				:= FaultID_M10_St110_Feed, 
+	DisplayNr			:= TxtAnzHaupt, 
+	MPart				:= MPart, 
+	RtStNr				:= 1, 
+	io_RtFault			:= dwRtFault[RT_M10_100], 
+	io_RtWaiting		:= dwRtWaiting[RT_M10_100], 
+	io_RtWarning		:= dwRtWarning[RT_M10_100],
+);
+IF Neustart OR g_bOnlineChange THEN
+	St110_Feeding.FeederStNr 
+		:=	((M_Zentrale-1)*IRG_Stationen*IRG_Pro_Station)										// 24 Stations per Module 
+		+ 	((1(*consecutive RT Nr. within Module*)-1)*8(*MaxNumSt. Per RT*) * IRG_Pro_Station) // 8 Stations per Roundtable
+		+ 	St110_Feeding.RtStNr;																// Consecutive Nr. of RT-StNr. within Current Roundtable
+END_IF
+
+
+// ST 120 /////////////////////////////////////////////////////////////
+St120_PlasmaCleaning(
+	OrderNr			:= E_TAB_MO_10_ST_120, 
+	MoNr			:= MoNr, 
+	StNr			:= 120, 
+	BedienEinheit	:= mz[M_Zentrale], 
+	FaultID			:= FaultID_M10_St120, 
+	DisplayNr		:= TxtAnzHaupt, 
+	MPart			:= MPart, 
+	RtNr			:= RT_M10_100, 
+	RtStNr			:= 2, 
+	RtStartimpuls	:= RT_100.out_bStart, 
+	io_RtRegister	:= aRtRegister_100, 
+	io_RtStarts		:= dwRtStarts[	RT_M10_100], 
+	io_RtFreigabe	:= dwRtFreigabe[RT_M10_100], 
+	io_RtFault		:= dwRtFault[	RT_M10_100], 
+	io_RtWaiting	:= dwRtWaiting[	RT_M10_100], 
+	io_RtWarning	:= dwRtWarning[	RT_M10_100],
+);
+*)
+
+
+// ////////////////////
+// Roundtable 2 ///////
+// ////////////////////
+
+
+
+(* ________________ *)
+(* -- Changeover -- *)
+TypwechselMPart1( Leergefahren:= (* PBAIBN mz[M20_Zentrale].mpart[Segment_1].leergefahren*) NOT immer0 , mpart:= Segment_1);
+IF TypwechselMPart1.Wechsel THEN
+	mz[M20_Zentrale].mpart[Segment_1].hm_leer := TRUE;
+	mz[M30_Zentrale].mpart[Segment_1].hm_leer := TRUE;
+	mz[M40_Zentrale].mpart[Segment_1].hm_leer := TRUE;
+END_IF
+
+
+(* ______________________ *)
+(* -- Process Emptying -- *)
+
+(*
+mpart_M20.leergefahren_kommt:=
+				mz[M_Zentrale].mpart[MPart].hm_leer
+		AND NOT mz[M_Zentrale].mpart[Segment_1].leergefahren
+		AND	FALSE; (*
+		AND ST070_EntnahmeGutteile.Schritt = 0
+		AND ST080_EntnahmeSchlechtteile.Schritt = 0; *)
+mpart_M30.leergefahren_kommt := mpart_M20.leergefahren_kommt;
+mpart_M40.leergefahren_kommt := mpart_M20.leergefahren_kommt;
+
+
+		
+mpart_M20.leergefahren_geht:=
+		(	NOT mz[M_Zentrale].mpart[Mpart].hm_leer
+//		OR	NOT	SregLeerRT
+		)
+	AND (		mz[M_Zentrale].mpart[MPart].leergefahren
+		AND NOT mz[M_Zentrale].mpart[MPart].hm_leer	);
+mpart_M30.leergefahren_geht := mpart_M20.leergefahren_geht;
+mpart_M40.leergefahren_geht := mpart_M20.leergefahren_geht;
+ 
+
+mpart_M20(
+	s_leer		  := s_leer,
+	automatenteil := Segment_1,
+	m			  := mz[M20_Zentrale],
+);
+mpart_M30(
+	s_leer		  := s_leer,
+	automatenteil := Segment_1,
+	m			  := mz[M30_Zentrale],
+);
+mpart_M40(
+	s_leer		  := s_leer,
+	automatenteil := Segment_1,
+	m			  := mz[M40_Zentrale],
+);
+
+
+*)
+
+
+
+(* _________________________________________ *)
+(* -- Measure Cycle Time from Roundtables -- *)
+(* - Roundtable 100 - *)
+IF neustart OR g_bOnlineChange THEN
+	(* 6 Zeichen Pflichtfelder für Stationsbezeichnungen überschreiben *)
+	fbCycletimeRT_100.in_arr_sStatBez_6digit[1]  := 'St.51 ';
+	fbCycletimeRT_100.in_arr_sStatBez_6digit[2]  := 'St.52 ';
+	fbCycletimeRT_100.in_arr_sStatBez_6digit[3]  := 'St.53 ';
+	fbCycletimeRT_100.in_arr_sStatBez_6digit[4]  := 'St.54 ';
+	fbCycletimeRT_100.in_arr_sStatBez_6digit[5]  := 'St.55 ';
+	fbCycletimeRT_100.in_arr_sStatBez_6digit[6]  := 'St.56 ';
+END_IF
+fbCycletimeRT_100(
+	in_dwFreigabeRt			:= dwRtFreigabe[RT_M20_100],
+	in_dwInArbeit			:= dwRtStarts[	RT_M20_100],
+	in_impSchieb			:= RT_100.in_bStart,
+	in_iAnzStat				:= 6,
+	);
+
+(* - Roundtable 200 - *)
+IF neustart OR g_bOnlineChange THEN
+	(* 6 Zeichen Pflichtfelder für Stationsbezeichnungen überschreiben *)
+	fbCycletimeRT_200.in_arr_sStatBez_6digit[1]  := 'St.10 ';
+	fbCycletimeRT_200.in_arr_sStatBez_6digit[2]  := 'St.20 ';
+	fbCycletimeRT_200.in_arr_sStatBez_6digit[3]  := 'St.30 ';
+	fbCycletimeRT_200.in_arr_sStatBez_6digit[4]  := 'St.40 ';
+	fbCycletimeRT_200.in_arr_sStatBez_6digit[5]  := 'St.50 ';
+	fbCycletimeRT_200.in_arr_sStatBez_6digit[6]  := 'St.60 ';
+	fbCycletimeRT_200.in_arr_sStatBez_6digit[7]  := 'St.80 ';
+	fbCycletimeRT_200.in_arr_sStatBez_6digit[8]  := 'St.90 ';
+END_IF
+fbCycletimeRT_200(
+	in_dwFreigabeRt			:= dwRtFreigabe[RT_M20_200],
+	in_dwInArbeit			:= dwRtStarts[	RT_M20_200],
+	in_impSchieb			:= RT_200.in_bStart,
+	in_iAnzStat				:= 8,
+	);
+
+
+	
+(* ___________________ *)
+(* -- Total Counter -- *)
+IF TypwechselMpart1.Aufragswechsel 
+THEN
+	count1.z_aufumf:= ActOrd[MPart].ord_soll;
+	count1.z_aufgut:= 0;
+	count1.z_aufsch:= 0;
+	count1.z_schumf:= 100;
+END_IF;
+
+//count1.igesamt 	:= RT.out_bStart;
+
+BDEIncCounter(
+	condition	:= count1.igut, 
+	no			:= bcGutteil, 
+	val			:= 1, 
+	order		:= ActOrd[MPart].ord_id, 
+	mpart		:= MPart 
+);
+z1(c:=count1);
+
+(* display for cycle time performance of machine *)
+TAKTE( count1.igesamt, 	TKTGesamt, 1 );		(* total cycles *)
+TAKTE( count1.igut, 	TKTGut, 1 );		(* num of cycles good parts *)
+TAKTE( count1.isch,		TKTSchlecht, 1);	(* num of cycles bad parts *)
+
+(* reset counter pulses after processing *)
+count1.igut		:= FALSE;
+count1.isch		:= FALSE;
+count1.ischlk	:= FALSE;
+count1.igesamt 	:= FALSE;
+count1.z_winkel	:= 0;
+
+
+(* _______________ *)
+(* Error Treatment *)
+ERROREND(FAnz:= TxtAnzHaupt, Reset:= mz[M_Zentrale].i_reset);
+ERROREND(FAnz:= TxtAnzHilfs, Reset:= mz[M_Zentrale].i_reset);
+
+
+
+(* ________________________________________________ *)
+(* reset BDEStringState to 0 if BDE is being closed *)
+ft_BDE_Laeuft(CLK:= BDE_bLaeuft);
+IF ft_BDE_Laeuft.Q THEN
+	BDEStringState:= 0;
+END_IF
+
+
+
+// turn on all lamps if lamp test
+IF mz[M_Zentrale].lp_test THEN
+	TurnOnLamps();
+END_IF;
+
+(* DWOCOM set all WPCs to srEmpty *)
+IF ActOrd[MPart].ord_stat[2].sd_z2 THEN
+ FOR iWPCNr	:= 1 TO 41 BY 1 DO	
+	g_WtInfo[iWPCNr].dataPart.teilestatus :=srEmpty;
+ END_FOR
+ IF iWPCNr=42 THEN
+	 iWPCNr:=1;	 
+ END_IF
+END_IF
+
+
+	
+(*DWOCOM test added pre-stopper*)
+uz_ps(IN:= NOT _IX_329_4, PT:= T#5S);
+_QX_329_4 :=  uz_ps.Q ;
+_QX_329_5 := NOT uz_ps.Q ;
+
+
+uz_ps_2(IN:= NOT _IX_329_7, PT:= T#5S);
+_QX_329_6 :=  uz_ps_2.Q ;
+_QX_329_7 := NOT uz_ps_2.Q ;
+]]></ST>
+    </Implementation>
+    <Action Name="TurnOffLamps" Id="{a25533b2-4842-417f-a234-32f4a788bf22}">
+      <Implementation>
+        <ST><![CDATA[_SPV_M20_P1_QA1          		:= FALSE; 	(* lighting equipment on *)
+	
+_GM1_M20_MP1_AF1_PF1     		:= FALSE; 	(* signal lamp green *)
+_GM1_M20_MP1_AF1_PF2     		:= FALSE; 	(* signal lamp orange *)
+_GM1_M20_MP1_AF1_PF3     		:= FALSE; 	(* signal lamp red *)
+_GM1_M20_MP1_AF1_4          := FALSE; 	(* signal lamp spare *)
+_GM1_M20_MP1_AF1_5          := FALSE; 	(* signal lamp spare *)
+
+_GM1_M20_BF1_SF2_X1         := FALSE; 	(* operating field 1 button lamp (I) *)
+_GM1_M20_BF1_SF3_X1         := FALSE; 	(* operating field 1 button lamp (R) *)
+_GM1_M20_BF3_SF2_X1         := FALSE; 	(* operating field 3 button lamp (I) *)
+_GM1_M20_BF3_SF3_X1         := FALSE; 	(* operating field 3 button lamp (R) *)
+]]></ST>
+      </Implementation>
+    </Action>
+    <Action Name="TurnOnLamps" Id="{d2c8ef0c-ac42-40b2-9232-6ef625d05a0c}">
+      <Implementation>
+        <ST><![CDATA[_SPV_M20_P1_QA1  		        := TRUE; 	(* lighting equipment on *)
+	
+_GM1_M20_MP1_AF1_PF1   	  		:= TRUE; 	(* signal lamp green *)
+_GM1_M20_MP1_AF1_PF2   	  		:= TRUE; 	(* signal lamp orange *)
+_GM1_M20_MP1_AF1_PF3	    	:= TRUE; 	(* signal lamp red *)
+_GM1_M20_MP1_AF1_4			    := TRUE; 	(* signal lamp spare *)
+_GM1_M20_MP1_AF1_5	        	:= TRUE; 	(* signal lamp spare *)
+
+_GM1_M20_BF1_SF2_X1         := TRUE; 	(* operating field 1 button lamp (I) *)
+_GM1_M20_BF1_SF3_X1         := TRUE; 	(* operating field 1 button lamp (R) *)
+_GM1_M20_BF3_SF2_X1         := TRUE; 	(* operating field 3 button lamp (I) *)
+_GM1_M20_BF3_SF3_X1         := TRUE; 	(* operating field 3 button lamp (R) *)
+]]></ST>
+      </Implementation>
+    </Action>
+    <LineIds Name="M20">
+      <LineId Id="24215" Count="106" />
+      <LineId Id="24323" Count="258" />
+      <LineId Id="27884" Count="0" />
+      <LineId Id="24582" Count="0" />
+      <LineId Id="27888" Count="0" />
+      <LineId Id="24583" Count="1" />
+      <LineId Id="27887" Count="0" />
+      <LineId Id="24585" Count="23" />
+      <LineId Id="27886" Count="0" />
+      <LineId Id="24609" Count="0" />
+      <LineId Id="24612" Count="12" />
+      <LineId Id="26532" Count="6" />
+      <LineId Id="26553" Count="9" />
+      <LineId Id="26602" Count="2" />
+      <LineId Id="26563" Count="0" />
+      <LineId Id="26605" Count="2" />
+      <LineId Id="26564" Count="0" />
+      <LineId Id="26608" Count="2" />
+      <LineId Id="26565" Count="0" />
+      <LineId Id="26612" Count="2" />
+      <LineId Id="26611" Count="0" />
+      <LineId Id="26567" Count="0" />
+      <LineId Id="26569" Count="10" />
+      <LineId Id="26615" Count="0" />
+      <LineId Id="26580" Count="0" />
+      <LineId Id="26616" Count="0" />
+      <LineId Id="26581" Count="0" />
+      <LineId Id="26617" Count="0" />
+      <LineId Id="26582" Count="0" />
+      <LineId Id="26618" Count="0" />
+      <LineId Id="26583" Count="0" />
+      <LineId Id="26620" Count="0" />
+      <LineId Id="26584" Count="0" />
+      <LineId Id="26622" Count="0" />
+      <LineId Id="26592" Count="2" />
+      <LineId Id="26539" Count="13" />
+      <LineId Id="24625" Count="40" />
+      <LineId Id="25208" Count="0" />
+      <LineId Id="25226" Count="17" />
+      <LineId Id="24666" Count="0" />
+      <LineId Id="25245" Count="19" />
+      <LineId Id="25244" Count="0" />
+      <LineId Id="24667" Count="64" />
+      <LineId Id="26869" Count="0" />
+      <LineId Id="24732" Count="10" />
+      <LineId Id="24744" Count="17" />
+      <LineId Id="24763" Count="18" />
+      <LineId Id="24783" Count="7" />
+      <LineId Id="24792" Count="5" />
+      <LineId Id="26870" Count="0" />
+      <LineId Id="24798" Count="0" />
+      <LineId Id="26871" Count="0" />
+      <LineId Id="24799" Count="10" />
+      <LineId Id="24811" Count="5" />
+      <LineId Id="25747" Count="0" />
+      <LineId Id="25749" Count="0" />
+      <LineId Id="25770" Count="8" />
+      <LineId Id="25762" Count="0" />
+      <LineId Id="25779" Count="3" />
+      <LineId Id="25767" Count="2" />
+      <LineId Id="25748" Count="0" />
+      <LineId Id="25783" Count="0" />
+      <LineId Id="24817" Count="47" />
+      <LineId Id="24866" Count="18" />
+      <LineId Id="24886" Count="16" />
+      <LineId Id="27367" Count="0" />
+      <LineId Id="24904" Count="5" />
+      <LineId Id="27617" Count="16" />
+      <LineId Id="27616" Count="0" />
+      <LineId Id="24910" Count="11" />
+      <LineId Id="24923" Count="27" />
+      <LineId Id="24952" Count="108" />
+      <LineId Id="27118" Count="0" />
+      <LineId Id="27117" Count="0" />
+      <LineId Id="25061" Count="145" />
+      <LineId Id="25507" Count="0" />
+      <LineId Id="26276" Count="0" />
+      <LineId Id="9" Count="0" />
+      <LineId Id="25504" Count="2" />
+      <LineId Id="25503" Count="0" />
+      <LineId Id="28142" Count="3" />
+      <LineId Id="28141" Count="0" />
+      <LineId Id="25508" Count="0" />
+    </LineIds>
+    <LineIds Name="M20.TurnOffLamps">
+      <LineId Id="2" Count="9" />
+      <LineId Id="18" Count="0" />
+      <LineId Id="13" Count="0" />
+      <LineId Id="1" Count="0" />
+    </LineIds>
+    <LineIds Name="M20.TurnOnLamps">
+      <LineId Id="16" Count="1" />
+      <LineId Id="2" Count="9" />
+      <LineId Id="1" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

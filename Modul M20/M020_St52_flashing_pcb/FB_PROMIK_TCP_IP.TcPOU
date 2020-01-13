@@ -1,0 +1,438 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="FB_PROMIK_TCP_IP" Id="{9dd9e59e-8010-4781-89d4-b15740ce525b}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_PROMIK_TCP_IP
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<DESC>
+
+</DESC>
+
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-10-12	|	1.00	|	PBA		|	initial version
+2017-12-08  |   1.10	|	MBA		|	Change for needs of ProMik-Flasher
+
+</CHANGES>
+<VERSION>
+1.00
+</VERSION>
+
+<DEPENDENCIES>
+;
+</DEPENDENCIES>
+
+
+
+ -- overview of areas for steps --
+Steps [000..099]: 	Basic Stuff
+Steps [200..299]:	Send Data
+Steps [800..899]:	Connect
+Steps [900..999]:	Disconnect
+
+  
+----------------------------------------------------------------------------------------*)
+
+
+(* ____________ *)
+(* -- Inputs -- *)
+VAR_INPUT
+	(* Variables for communication *)
+	in_StrIP:					T_IPv4Addr;				(* IP Adress of device *)
+	in_uiPORT:					UINT;					(* Port of device *)
+	in_bEstablishConnection:	BOOL:=FALSE;			(* Connection needs to be established *)
+	in_bStartSendData:			BOOL:=FALSE;			(* Send data *)
+	in_pDataSend:				POINTER TO PVOID;		(* Pointer to Data that needs to be send *)
+	in_pDataRcv:				POINTER TO PVOID;		(* Pointer to Data that gets received *)
+	in_cbLenSend:				UDINT;					(* Length of data that needs to be send *)
+	in_cbLenRcv:				UDINT;					(* Length of data that needs to be send *)
+END_VAR
+VAR_OUTPUT
+	out_bDataWasSent:			BOOL:=FALSE;
+	out_bNewDataRecv:			BOOL:=FALSE;
+	out_uiFault:				UINT:=0;
+	out_cbLenRcv:				UDINT;
+END_VAR
+VAR_IN_OUT
+	
+END_VAR
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+	bConnected:				BOOL;
+	bSended:				BOOL;
+
+		(* == Logging == *)	
+	bLogging				:BOOL:=TRUE;
+END_VAR
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	SWI: 				BOOL := FALSE;	(* Impulse step is changing forward *)
+	SWR:				BOOL := FALSE;	(* Impulse step is changing backwards *)
+	Schritt: 			INT := 0;		(* Current step *)
+	xx:					FB_StepTracker;	(* auto record steps *)
+	i:					INT;			(* iteration-variable for loops *)
+	tonTimeout:			TON;			(* Timeout for Errorhandling *)
+END_VAR
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+	fbConnect:				FB_SocketConnect 	:= ( sSrvNetId := ''  );
+	fbClose:				FB_SocketClose 		:= ( sSrvNetId := '', tTimeout := DEFAULT_ADS_TIMEOUT );
+	fbSocketSend: 			FB_SocketSend 		:= ( sSrvNetID := '', tTimeout := DEFAULT_ADS_TIMEOUT );
+	ftSocketSendBusy:		F_TRIG;
+	fbSocketReceive: 		FB_SocketReceive 	:= ( sSrvNetID := '', tTimeout := DEFAULT_ADS_TIMEOUT );
+	ftSocketReceiveBusy:	F_TRIG;
+	hSocket:				T_HSOCKET;
+	bSocketValid:			BOOL:=FALSE;	
+	RxBuffer:				ARRAY [1..1460] OF BYTE;		
+		
+	(* == Logging == *)
+	fbLog					:FB_TCP_IP_Logger;
+END_VAR
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+(* -- Initialisation -- *)
+
+IF Neustart
+THEN
+	Schritt:= 0;
+END_IF
+
+
+(* _______________________ *)
+(* -- Timer / Watchdogs -- *)
+tonTimeout( IN:= NOT SWI, PT:= T#5S );
+
+
+(* ___________ *)
+(* -- Error -- *)
+IF Schritt > 0 AND tonTimeout.Q THEN
+	out_uiFault := INT_TO_UINT(Schritt);
+	Schritt:= 0;
+	
+ELSIF NOT in_bEstablishConnection THEN
+	out_uiFault := 0;
+END_IF
+
+(* reset flags / commands *)
+xx( iStep := Schritt );
+SWI := FALSE;
+out_bDataWasSent := FALSE;
+
+
+CASE Schritt OF
+0:	IF in_bEstablishConnection AND NOT bConnected THEN
+		(* -> connect *)
+		Schritt := 800;
+		SWI := TRUE;
+		
+	ELSIF 	(	NOT in_bEstablishConnection
+  			OR	NOT bSocketValid	)
+			AND bConnected 
+	THEN
+		(* -> disconnect *)
+		Schritt := 900;
+		SWI := TRUE;
+		
+	ELSIF 	bConnected 
+		AND	in_bStartSendData
+	THEN
+		Schritt := 200;
+		SWI := TRUE;
+	END_IF
+		
+(******************************************************************************)
+(****************** Send data *************************************************)
+(******************************************************************************)
+
+200:(* Wait for fb_send ready *)
+	IF NOT fbSocketSend.bBusy THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+
+205:(* send data *)
+	fbSocketSend.bExecute := TRUE;
+	bSended := TRUE;
+	Schritt	:= Schritt + 5;
+	SWI := TRUE;
+	
+210:(* Wait for sending finished *)
+	IF NOT fbSocketSend.bBusy
+	THEN
+		out_bDataWasSent := TRUE;
+
+		IF  NOT	in_bStartSendData THEN
+			out_uiFault := 0;
+			Schritt := 0;
+			SWI := TRUE;
+		END_IF
+	END_IF
+	
+(******************************************************************************)
+(****************** Socket connect ********************************************)
+(******************************************************************************)
+
+800:IF NOT fbConnect.bBusy THEN (* Connect function has to be ready *)
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+
+805:(* start connect function *)
+	fbConnect.bExecute := TRUE;	
+	Schritt := Schritt + 5;
+	SWI := TRUE;
+	
+810:(* wait for connect function finished *)
+	IF NOT fbConnect.bBusy THEN	
+
+		IF fbConnect.bError THEN
+			bConnected := FALSE;
+			bSocketValid := FALSE;
+			MEMSET( ADR(hSocket), 0, SIZEOF(hSocket));
+
+			Schritt := 0;
+			SWI := TRUE;
+		ELSE
+			bConnected := TRUE;
+			bSocketValid := TRUE;
+			MEMCPY( ADR(hSocket), ADR(fbConnect.hSocket), SIZEOF(hSocket));
+			out_uiFault := 0;
+			
+			Schritt := 0;
+			SWI := TRUE;
+		END_IF
+	END_IF
+	
+
+(******************************************************************************)
+(****************** Socket close **********************************************)
+(******************************************************************************)
+
+900:IF NOT fbClose.bBusy AND NOT fbSocketReceive.bBusy THEN	(* Close function has to be ready *)
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+
+905:(* start disconnect function *)
+	fbClose.bExecute := TRUE;		
+	Schritt := Schritt + 5;
+	SWI := TRUE;
+	
+
+910:IF NOT fbClose.bBusy THEN	(* wait for disconnect function finished *)
+		bConnected:= FALSE;
+		MEMSET( ADR(hSocket), 0, SIZEOF(hSocket));
+		Schritt := 0;
+		SWI := TRUE;
+	END_IF
+
+END_CASE
+	
+(*******************************************************************)
+(********* Open socket *********************************************)
+(*******************************************************************)
+fbConnect(
+	sRemoteHost		:= in_StrIP,
+	nRemotePort		:= in_uiPORT,
+);
+fbConnect.bExecute := FALSE;
+
+(*******************************************************************)
+(********* Close socket ********************************************)
+(*******************************************************************)
+fbClose(
+	hSocket			:= hSocket,
+);
+
+
+(*******************************************************************)
+(********* Send data ***********************************************)
+(*******************************************************************)
+fbSocketSend(
+	hSocket			:= hSocket,
+	pSrc			:= in_pDataSend,
+	cbLen			:= in_cbLenSend,
+);
+fbSocketSend.bExecute := FALSE;
+
+ftSocketSendBusy( CLK := fbSocketSend.bBusy );
+IF ftSocketSendBusy.Q THEN
+	IF 	fbSocketSend.bError
+	THEN
+		bSocketValid := FALSE;
+	END_IF
+END_IF
+
+
+(*******************************************************************)
+(********* Receive data ********************************************)
+(*******************************************************************)
+(* Always receive Data if connected *)
+fbSocketReceive(
+	hSocket			:= hSocket,
+	pDest			:= ADR(RxBuffer),
+	cbLen			:= SIZEOF(RxBuffer),
+	bExecute		:= bConnected AND NOT fbSocketReceive.bBusy AND in_bEstablishConnection AND bSocketValid,
+);
+
+out_bNewDataRecv := FALSE;
+ftSocketReceiveBusy( CLK := fbSocketReceive.bBusy );
+IF ftSocketReceiveBusy.Q THEN
+	IF 	fbSocketReceive.bError 
+	THEN
+		bSocketValid := FALSE;
+	END_IF
+	
+	IF fbSocketReceive.nRecBytes > 0 THEN 
+		(* reset all data before copying new data *)
+		(*memset(	destAddr 	:= ADR(RxBuffer),
+				fillByte	:= 0,
+				n			:= SIZEOF(RxBuffer)
+		);*)
+							
+		memcpy(	destaddr	:= in_pDataRcv,
+				srcAddr		:= ADR( rxBuffer ),
+				n			:= fbSocketReceive.nRecBytes,
+		);
+		out_bNewDataRecv := TRUE;
+		bSended := FALSE;
+	END_IF
+END_IF
+
+/// Error with disconnect after timeout, otherwith socket will stay open forever when other side terminated connection
+
+(* _______________ *)
+(* -- Log-Datei -- *)
+fbLog(	in_bAktiv 			:= bLogging,
+		in_bTcpIpClient		:= TRUE, 
+		in_SocketConnect	:= ADR(fbConnect), 
+		in_SocketSend		:= ADR(fbSocketSend), 
+		in_SocketReceive	:= ADR(fbSocketReceive), 
+		in_SocketClose		:= ADR(fbClose), 
+);
+
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="FB_PROMIK_TCP_IP">
+      <LineId Id="4417" Count="1" />
+      <LineId Id="4425" Count="0" />
+      <LineId Id="5811" Count="0" />
+      <LineId Id="5813" Count="1" />
+      <LineId Id="4426" Count="0" />
+      <LineId Id="5523" Count="0" />
+      <LineId Id="5522" Count="0" />
+      <LineId Id="4531" Count="1" />
+      <LineId Id="5960" Count="0" />
+      <LineId Id="6766" Count="0" />
+      <LineId Id="6659" Count="0" />
+      <LineId Id="6438" Count="2" />
+      <LineId Id="6457" Count="0" />
+      <LineId Id="6447" Count="0" />
+      <LineId Id="6661" Count="0" />
+      <LineId Id="6466" Count="1" />
+      <LineId Id="6443" Count="0" />
+      <LineId Id="5561" Count="0" />
+      <LineId Id="4650" Count="0" />
+      <LineId Id="6765" Count="0" />
+      <LineId Id="4651" Count="0" />
+      <LineId Id="6879" Count="0" />
+      <LineId Id="6764" Count="0" />
+      <LineId Id="6390" Count="0" />
+      <LineId Id="4654" Count="0" />
+      <LineId Id="6369" Count="9" />
+      <LineId Id="6380" Count="4" />
+      <LineId Id="6010" Count="0" />
+      <LineId Id="6013" Count="0" />
+      <LineId Id="6387" Count="2" />
+      <LineId Id="6243" Count="11" />
+      <LineId Id="6895" Count="0" />
+      <LineId Id="6261" Count="0" />
+      <LineId Id="6660" Count="0" />
+      <LineId Id="6262" Count="0" />
+      <LineId Id="6264" Count="1" />
+      <LineId Id="6883" Count="1" />
+      <LineId Id="6882" Count="0" />
+      <LineId Id="6564" Count="0" />
+      <LineId Id="6458" Count="0" />
+      <LineId Id="6268" Count="0" />
+      <LineId Id="6450" Count="0" />
+      <LineId Id="6885" Count="0" />
+      <LineId Id="6269" Count="0" />
+      <LineId Id="6086" Count="0" />
+      <LineId Id="6104" Count="4" />
+      <LineId Id="6402" Count="0" />
+      <LineId Id="6110" Count="3" />
+      <LineId Id="6403" Count="0" />
+      <LineId Id="6114" Count="2" />
+      <LineId Id="6118" Count="0" />
+      <LineId Id="6404" Count="0" />
+      <LineId Id="6119" Count="2" />
+      <LineId Id="6449" Count="0" />
+      <LineId Id="6123" Count="0" />
+      <LineId Id="6760" Count="0" />
+      <LineId Id="6757" Count="0" />
+      <LineId Id="6761" Count="0" />
+      <LineId Id="6127" Count="1" />
+      <LineId Id="6448" Count="0" />
+      <LineId Id="6129" Count="1" />
+      <LineId Id="6459" Count="0" />
+      <LineId Id="6131" Count="3" />
+      <LineId Id="6143" Count="11" />
+      <LineId Id="6408" Count="0" />
+      <LineId Id="6155" Count="6" />
+      <LineId Id="6169" Count="2" />
+      <LineId Id="6409" Count="0" />
+      <LineId Id="6062" Count="0" />
+      <LineId Id="6077" Count="0" />
+      <LineId Id="6186" Count="5" />
+      <LineId Id="6193" Count="7" />
+      <LineId Id="6202" Count="11" />
+      <LineId Id="6898" Count="0" />
+      <LineId Id="6778" Count="0" />
+      <LineId Id="6214" Count="0" />
+      <LineId Id="6773" Count="3" />
+      <LineId Id="6779" Count="0" />
+      <LineId Id="6215" Count="10" />
+      <LineId Id="6055" Count="0" />
+      <LineId Id="6769" Count="0" />
+      <LineId Id="6771" Count="0" />
+      <LineId Id="6897" Count="0" />
+      <LineId Id="6770" Count="0" />
+      <LineId Id="6228" Count="0" />
+      <LineId Id="6413" Count="0" />
+      <LineId Id="6410" Count="1" />
+      <LineId Id="6229" Count="1" />
+      <LineId Id="6421" Count="2" />
+      <LineId Id="6420" Count="0" />
+      <LineId Id="6425" Count="0" />
+      <LineId Id="6424" Count="0" />
+      <LineId Id="6416" Count="1" />
+      <LineId Id="6414" Count="0" />
+      <LineId Id="6418" Count="0" />
+      <LineId Id="6887" Count="0" />
+      <LineId Id="6896" Count="0" />
+      <LineId Id="6415" Count="0" />
+      <LineId Id="6772" Count="0" />
+      <LineId Id="6434" Count="1" />
+      <LineId Id="6231" Count="0" />
+      <LineId Id="6426" Count="7" />
+      <LineId Id="6232" Count="2" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

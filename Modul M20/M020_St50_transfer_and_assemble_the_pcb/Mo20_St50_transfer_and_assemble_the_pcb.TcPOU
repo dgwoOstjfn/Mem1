@@ -1,0 +1,1221 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.16">
+  <POU Name="Mo20_St50_transfer_and_assemble_the_pcb" Id="{b7d42284-31fc-444e-a6b2-36c55b332502}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK Mo20_St50_transfer_and_assemble_the_pcb
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<DESC>
+=INSERT DESCRIPTION FROM WORKFLOWPLAN=
+</DESC>
+
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-11-06	|	1.00	|	DWO		|	initial version
+
+</CHANGES>
+<VERSION>
+1.00
+</VERSION>
+
+<DEPENDENCIES>
+;
+</DEPENDENCIES>
+
+
+
+ -- overview of areas for steps --
+Steps [000..099]: 	Whatever Block
+Steps [100..199]:	Next Whatever Block
+
+  
+----------------------------------------------------------------------------------------*)
+
+
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	OrderNr: 			INT :=E_TAB_MO_20_ST_50;		(* Nr. Actorder *)
+	MoNr: 				INT:= 020;		(* Module-Number *)
+	StNr: 				INT:= 50;		(* Stationsnumber *)
+	BedienEinheit: 		ZENTR_DATA;		(* Central *)
+	FaultID: 			BYTE := 0;		(* ID for Error Array *)
+	DisplayNr: 			INT := 1;		(* Number of Textdisplay *)
+	MPart: 				INT := 1;		(* Machinepart *)
+	in_InitChainTxt:	STRING(39);		(* String for Step Chain Diagnosis *)
+	in_sKebaKurz:		STRING(gcKebaStKurzLen) := '1234567890'; (* optional - can also be assigned in initialisation paragraph *)
+	in_sKebaBez:		STRING(gcKebaStBezLen) 	:= '11111111112222222222333333333344444444445555555555'; (* optional - can also be assigned in initialisation paragraph *)
+END_VAR
+
+
+(* __________________ *)
+(* -- RT1-Interface -- *)
+VAR_INPUT
+	RtNr1:				INT := 01;
+	RtStNr1:			SINT := 04;
+	RtStartimpuls1:		BOOL:=FALSE;	
+END_VAR
+
+VAR_IN_OUT
+	//io_RtRegister1:		ARRAY[1..6] OF ARRAY[1..4] OF DataTeil_pcb; // info for all parts within roundtable - the part for the station is accessed at [RtStNr]
+	io_RtStarts1:		DWORD; // bit array (dword) representing station is working on roundtable (flow based)
+	io_RtFreigabe1:		DWORD; // bit array (dword) representing station is giving permission for table to move (state based)
+	io_RtFault1:			DWORD; // bit array (dword) representing error at RtStNr of roundtable
+	io_RtWaiting1:		DWORD; // bit array (dword) representing waiting at RtStNr of roundtable
+	io_RtWarning1:		DWORD; // bit array (dword) representing warning at RtStNr of roundtable
+END_VAR
+
+(* -- RT2-Interface -- *)
+VAR_INPUT
+	RtNr2:				INT := 02;
+	RtStNr2:				SINT := 05;
+	RtStartimpuls2:		BOOL:=FALSE;	
+END_VAR
+
+VAR_IN_OUT
+	//io_RtRegister2:		ARRAY[1..8] OF ARRAY[1..2] OF DataTeil; // info for all parts within roundtable - the part for the station is accessed at [RtStNr]
+	io_RtStarts2:		DWORD; // bit array (dword) representing station is working on roundtable (flow based)
+	io_RtFreigabe2:		DWORD; // bit array (dword) representing station is giving permission for table to move (state based)
+	io_RtFault2:			DWORD; // bit array (dword) representing error at RtStNr of roundtable
+	io_RtWaiting2:		DWORD; // bit array (dword) representing waiting at RtStNr of roundtable
+	io_RtWarning2:		DWORD; // bit array (dword) representing warning at RtStNr of roundtable
+END_VAR
+
+
+(* ====== IF NO FEEDING STATION EXISTS PLEASE DELETE THIS PARAGRAPH AND ELEMINATE SUBSEQUENT ERRORS ====== *)
+(* ____________________________ *)
+(* -- Handshake between RT1 and RT2 -- *)
+VAR PERSISTENT
+	bOffering			:BOOL:=FALSE;
+	bDataSaved			:BOOL:=FALSE;
+	bOfferEnd			:BOOL:=FALSE;
+
+	bRT2Freigabe		:BOOL:=FALSE;
+	bReadyToInsert		:BOOL:=FALSE;
+	bPCBAdjusted		:BOOL:=FALSE;
+	bInsertEnd			:BOOL:=FALSE;
+	bInsertFailed		:BOOL:=FALSE;
+	bSuckedFailed1		:BOOL:=FALSE;
+	bSuckedFailed2		:BOOL:=FALSE;
+	bVacuumOn1			:BOOL:=FALSE;
+	bVacuumOn2			:BOOL:=FALSE;
+	bPickPosi1			:BOOL:=FALSE;
+	
+END_VAR
+(* ====== IF NO FEEDING STATION EXISTS PLEASE DELETE THIS PARAGRAPH AND ELEMINATE SUBSEQUENT ERRORS ====== *)
+
+
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	SWI: 				BOOL := FALSE;	(* Impulse step is changing forward *)
+	SWR:				BOOL := FALSE;	(* Impulse step is changing backwards *)
+	Schritt: 			INT := 0;		(* Current step *)
+	UZ: 				TON;			(* watchtime *)
+	Fault: 				BOOL;			(* Stations Error *)
+	Waiting:			BOOL;			(* Station Waiting *)
+	Warning:			BOOL;			(* Station Warning *)
+	Betrieb: 			BOOL;			(* Enable Steps *)
+	StatEin: 			BOOL;			(* Station on *)
+	AllInPos: 			BOOL;			(* all cylinders in position and not actuated manually *)
+	Active:				BOOL;			(* stepchain is marked as active *)
+	Transport:			BOOL;			(* manual transport is enabled *)
+	InitRun:			BOOL;			(* goto homepos is enabled *)
+	CycleRun:			BOOL;			(* mode for single cycle is enabled *)
+	ManualRun:			BOOL;			(* move cylinders manually is enabled *)
+	BackwardsRun:		BOOL;			(* backwards run is enabled *)
+	tonSeitSwi:			TON;			(* time since last change of step *)
+	tonSeitAllInPos:	TON;			(* time since AllInPos has become TRUE *)
+	i:					INT;			(* index-runner for loops *)
+	xx:					FB_StepTracker;	(* auto record steps *)
+	StatString:			STRING(10);		(* '+MM=SS' *)
+	StartCondition1:	BOOL;			(* condition for starting RT1 station *)
+	StartCondition2:	BOOL;			(* condition for starting RT2 station *)
+	bStart1:			BOOL;			(* RT1 station's work on roundtable is running *)
+	bStart2:			BOOL;			(* RT2 station's work on roundtable is running *)
+	NestNr:				INT;			(* number of nest within fixation *)
+	dataHandling		:ARRAY[1..2] OF DataTeil_pcb;
+END_VAR
+
+VAR CONSTANT
+	NEST1					:INT:=1;
+	NEST2					:INT:=2;
+	NEST3					:INT:=3;
+	NEST4					:INT:=4;
+END_VAR
+
+(* ___________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrZyl, Nr:= 3000, Txt:='abc           '),
+	(* Error 02 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/02            '),
+	(* Error 03 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/03            '),
+	(* Error 04 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/04            '),
+	(* Error 05 *)		(Prio := ErrMeld, Nr:= 1903, Txt:='=St50 Vacuum 1'),
+	(* Error 06 *)		(Prio := ErrMeld, Nr:= 1903, Txt:='=St50 Vacuum 2'),
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrMeld, Nr:= 510, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrMeld, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrMeld, Nr:= 2517, Txt:='St50 RT2 '), //*************** waiting for Ready to insert PCB
+	(* Error 11 *)		(Prio := ErrMeld, Nr:= 2518, Txt:='St50 RT2 '), //*************** waiting for Insert of PCB
+	(* Error 12 *)		(Prio := ErrMeld, Nr:= 2520, Txt:='St50 RT2 '), //*************** waiting for Enable Signal
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13            '),
+	(* Error 14 *)		(Prio := ErrMeld, Nr:= 2515, Txt:='St50 RT1 '), //*************** waiting for Housing in place
+	(* Error 15 *)		(Prio := ErrMeld, Nr:= 2516, Txt:='St50 RT1 '), //*************** waiting for Assembly Finish
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/16            ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ;
+END_VAR
+VAR CONSTANT
+	
+	feVacuum_1_Pressure		:INT:=5;
+	feVacuum_2_Pressure		:INT:=6;
+
+	feawInsertNOKNest1		:INT:=8;			//DWOCOM need to add error info.
+	feawInsertNOKNest2		:INT:=9;
+	
+	feWaitOfReadyToInsert	:INT:=10;
+	feWaitOfEndInsert		:INT:=11;
+	feWaitOfEnableRT2		:INT:=12;
+	
+	feWaitOffering			:INT:=14;
+	feWaitOfferEnd			:INT:=15;
+	
+END_VAR
+
+VAR_OUTPUT PERSISTENT
+	out_bPartinHandling		:BOOL:=FALSE;
+END_VAR
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+
+	(* == Cylinders == *)
+	
+	zyl0_pnp_Vacuum1			:zyl0; (* MM1 *)
+
+	zyl0_pnp_Vacuum2			:zyl0; (* MM2 *)
+	
+	zyl2_slide1					:zyl2; (* MM3 *)
+	ix_slide1A					:BOOL:=FALSE;
+	ix_slide1B					:BOOL:=FALSE;
+	
+	zyl2_slide2					:zyl2; (* MM4 *)
+	ix_slide2A					:BOOL:=FALSE;
+	ix_slide2B					:BOOL:=FALSE;	
+	
+	zyl2_hinge1					:zyl2; (* MM5 *)
+	ix_hinge1A					:BOOL:=FALSE;
+	ix_hinge1B					:BOOL:=FALSE;
+	
+	zyl2_hinge2					:zyl2; (* MM6 *)
+	ix_hinge2A					:BOOL:=FALSE;
+	ix_hinge2B					:BOOL:=FALSE;	
+
+	zyl2_vertical_stroke		:zyl2; (* MM7 *)
+	ix_vertical_strokeA			:BOOL:=FALSE;
+	ix_vertical_strokeB			:BOOL:=FALSE;	
+	
+	zyl2_horizontal_stroke		:zyl2; (* MM8 *)
+	ix_horizontal_strokeA		:BOOL:=FALSE;
+	ix_horizontal_strokeB		:BOOL:=FALSE;	
+	
+	zyl2_quer_stroke			:zyl2; (* MM9 *)
+	ix_quer_strokeA				:BOOL:=FALSE;
+	ix_quer_strokeB				:BOOL:=FALSE;	
+
+	(* == Sensors == *)
+	ix_CheckVacuum_1			:BOOL:=FALSE;
+	ix_CheckVacuum_2			:BOOL:=FALSE;
+	
+	ix_CheckInsertPosi_1		:BOOL:=FALSE;			//BG1
+	ix_CheckInsertPosi_2		:BOOL:=FALSE;			//BG2
+	
+	tonVacuumOn					:TON;
+
+	
+END_VAR
+
+
+
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+	awInsertNOK_1			:AWFEHLER;		//X-Times Error
+	awInsertNOK_2			:AWFEHLER;		//X-Times Error
+END_VAR
+
+(* -- LineController -- *)
+VAR
+	LC_Cavity1					:FB_LcStationCommandHandler;
+	LC_Cavity2					:FB_LcStationCommandHandler;
+	CounterResult				:STRING(40);
+	TypeNo						:STRING(40);
+	SerialNo					:STRING(14);
+	DataIndex					:UDINT := 1;
+
+END_VAR
+
+VAR PERSISTENT
+	OutUserData					:ARRAY[1..100] OF BYTE;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+
+
+(* -- Initialisation -- *)
+IF neustart OR g_bOnlineChange THEN
+	StatString 		:= RIGHT(CONCAT( '000',INT_TO_STRING(StNr) ),3); (* three digits station's prefix is being created automatically for station *)
+	in_InitChainTxt := CONCAT( StatString, ' Transfer and Assembly the PCB' );
+	in_sKebaKurz	:= CONCAT( StatString, ' Assembly'); // 3+7 digits
+	in_sKebaBez		:= in_InitChainTxt;
+END_IF
+
+
+KebaInitStation(
+	Panelnummer		:= gKebaAktPanel,
+	Aktiv			:= TRUE,
+	Kurzbezeichnung	:= in_sKebaKurz,
+	Bezeichnung		:= in_sKebaBez,
+	ManuellAktiv	:= TRUE,
+	RueckwaertsAktiv:= FALSE,
+	GsAktiv			:= FALSE,
+);
+
+
+(* _______________________________________ *)
+(* -- Entry for Step Sequence Diagnosis -- *)
+InitChain(
+	Step 			:= Schritt,
+	InitialState 	:= TRUE,
+	Fault 			:= Fault,
+	Waiting 		:= Waiting,
+	Warning 		:= Warning,
+	AllInPos 		:= AllInPos,
+	RunOpenDoor 	:= TRUE,
+	Txt 			:= in_InitChainTxt,
+	BedienEinheit 	:= BedienEinheit,
+	Active 			:= Active,
+	Transport 		:= Transport,
+	InitRun 		:= InitRun,
+	CycleRun 		:= CycleRun,
+	ManualRun 		:= ManualRun,
+	BackwardsRun 	:= BackwardsRun);
+InitRun := FALSE;
+
+
+(* _______________ *)
+(* -- Parameter -- *)
+StatEin 	:= ActOrd[MPart].ord_stat[OrderNr].sd_ein;
+
+
+(* ____________ *)
+(* -- Inputs -- *)
+ix_slide1A				:=_050_M20_MP1_BG3_A;
+ix_slide1B				:=_050_M20_MP1_BG3_B;
+
+ix_slide2A				:=_050_M20_MP1_BG4_A;
+ix_slide2B				:=_050_M20_MP1_BG4_B;
+
+ix_hinge1A				:=_050_M20_MP1_BG5_A;
+ix_hinge1B				:=_050_M20_MP1_BG5_B;
+
+ix_hinge2A				:=_050_M20_MP1_BG6_A;
+ix_hinge2B				:=_050_M20_MP1_BG6_B;
+
+ix_vertical_strokeA		:=_050_M20_MP1_BG7_A;
+ix_vertical_strokeB		:=_050_M20_MP1_BG7_B;
+
+ix_horizontal_strokeA	:=_050_M20_MP1_BG8_A;
+ix_horizontal_strokeB	:=_050_M20_MP1_BG8_B;
+
+ix_quer_strokeA			:=_050_M20_MP1_BG9_A;
+ix_quer_strokeB			:=_050_M20_MP1_BG9_B;
+
+ix_CheckVacuum_1		:=_050_M20_MP1_QM1_BP1_4;
+ix_CheckVacuum_2		:=_050_M20_MP1_QM2_BP1_4;
+
+ix_CheckInsertPosi_1	:= _050_M20_MP1_BG1 OR TRUE;		//DWOCOM
+ix_CheckInsertPosi_2	:= _050_M20_MP1_BG2 OR TRUE;		//DWOCOM
+
+(* _______________________ *)
+(* -- Timer / Watchdogs -- *)
+UZ( IN:= NOT SWI AND BedienEinheit.grundbed, PT:= T#5s );
+tonSeitSwi( IN := NOT SWI AND Bedieneinheit.grundbed, PT := t#30d );
+tonSeitAllInPos( IN := AllInPos AND Bedieneinheit.grundbed, PT := t#30d );
+
+tonVacuumOn( IN:= (NOT SWI AND BedienEinheit.grundbed), PT:= T#3S );
+
+(* _______________ *)
+(* -- Cylinders -- *)
+
+zyl0_pnp_Vacuum1(
+	enable_man	:= BedienEinheit.notaus_ok, 
+	FNrMan		:= 699, 
+	on_vz		:= T#100MS, 
+	off_vz		:= T#100MS, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '1',
+	ID			:= FaultId,
+	Bild		:= picKnebelschalterOff,   			
+	BildB		:= picKnebelschalterOn,						
+ );
+
+zyl0_pnp_Vacuum2(
+	enable_man	:= BedienEinheit.notaus_ok, 
+	FNrMan		:= 699, 
+	on_vz		:= T#100MS, 
+	off_vz		:= T#100MS, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '2',
+	ID			:= FaultId,
+	Bild		:= picKnebelschalterOff,   						
+	BildB		:= picKnebelschalterOn,							
+ );
+
+ zyl2_slide1(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_slide1A,
+	b			:= ix_slide1B,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 200,
+	FNrMan		:= 600,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '3',
+	ID			:= FaultId,
+	Bild		:= picSchlitten1,
+	BildB		:= picSchlitten1Inv,
+);
+
+ zyl2_slide2(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_slide2A,
+	b			:= ix_slide2B,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 200,
+	FNrMan		:= 600,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '4',
+	ID			:= FaultId,
+	Bild		:= picSchlitten1,
+	BildB		:= picSchlitten1Inv,
+);
+
+
+ zyl2_hinge1(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_hinge1A,
+	b			:= ix_hinge1B,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 207,
+	FNrMan		:= 607,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '5',
+	ID			:= FaultId,
+	Bild		:= picStandard,
+	BildB		:= picStandardInv,
+);
+
+ zyl2_hinge2(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_hinge2A,
+	b			:= ix_hinge2B,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 207,
+	FNrMan		:= 607,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '6',
+	ID			:= FaultId,
+	Bild		:= picStandard,
+	BildB		:= picStandardInv,
+);
+
+ zyl2_vertical_stroke(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_vertical_strokeA,
+	b			:= ix_vertical_strokeB  , //ZSS
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 211,
+	FNrMan		:= 611,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '7',
+	ID			:= FaultId,
+	Bild		:= picStandard,
+);
+
+ zyl2_horizontal_stroke(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_horizontal_strokeA,
+	b			:= ix_horizontal_strokeB,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 210,
+	FNrMan		:= 610,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '8',
+	ID			:= FaultId,
+	Bild		:= picStandard,
+);
+
+ zyl2_quer_stroke(
+	grundbed	:= Bedieneinheit.grundbed,
+	a			:= ix_quer_strokeA,
+	b			:= ix_quer_strokeB,
+	enable_man	:= Bedieneinheit.ventile_ok,
+	FNr			:= 213,
+	FNrMan		:= 613,
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '9',
+	ID			:= FaultId,
+	Bild		:= picStandard,
+);
+
+AllInPos :=	zyl0_pnp_Vacuum1.pos
+		AND zyl0_pnp_Vacuum2.pos
+		AND zyl2_slide1.pos
+		AND zyl2_slide2.pos
+		AND zyl2_hinge1.pos
+		AND zyl2_hinge2.pos
+		AND zyl2_vertical_stroke.pos
+		AND zyl2_horizontal_stroke.pos
+		AND zyl2_quer_stroke.pos;
+		
+(* _____________________ *)
+(* -- Line Controller -- *)
+LC_Cavity1.in_Data.OutUserData := ADR(OutUserData);
+LC_Cavity1.in_Data.OutUserData_BufferSize := SIZEOF(OutUserData);
+
+LC_Cavity1(
+		MoNr				:= MoNr, 
+		StNr				:= StNr, 
+		FaultID				:= FaultID, 
+		DisplayNr			:= DisplayNr, 
+		in_strBMK			:= 'LC', 
+		in_bConnect			:= BedienEinheit.notaus_ok, 
+		in_bEnableLog		:= TRUE, 
+		in_sRemoteHost		:= IP_LineController, 
+		in_uiRemotePort		:= 20501,//INT_TO_UINT(MoNr * 10000 + StNr + Nest1),
+		in_uiStationID		:= 205,
+		in_uiStationSubID	:= 1, 
+		in_bTelegram64kB	:= FALSE, 
+		in_bTypbeschrUebertr:= FALSE
+);
+
+LC_Cavity2.in_Data.OutUserData := ADR(OutUserData);
+LC_Cavity2.in_Data.OutUserData_BufferSize := SIZEOF(OutUserData);
+
+LC_Cavity2(
+		MoNr				:= MoNr, 
+		StNr				:= StNr, 
+		FaultID				:= FaultID, 
+		DisplayNr			:= DisplayNr, 
+		in_strBMK			:= 'LC', 
+		in_bConnect			:= BedienEinheit.notaus_ok, 
+		in_bEnableLog		:= TRUE, 
+		in_sRemoteHost		:= IP_LineController, 
+		in_uiRemotePort		:= 20502,//INT_TO_UINT(MoNr * 10000 + StNr + Nest2),
+		in_uiStationID		:= 205,
+		in_uiStationSubID	:= 2, 
+		in_bTelegram64kB	:= FALSE, 
+		in_bTypbeschrUebertr:= FALSE
+);	
+				
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID, FAnz:= DisplayNr, EF:= Errors1, F:= f1 );
+
+Fault	:= zyl0_pnp_Vacuum1.err	(* Error´s of function blocks *)
+		OR zyl0_pnp_Vacuum2.err
+		OR zyl2_slide1.err
+		OR zyl2_slide2.err
+		OR zyl2_hinge1.err
+		OR zyl2_hinge2.err
+		OR zyl2_vertical_stroke.err
+		OR zyl2_horizontal_stroke.err
+		OR zyl2_quer_stroke.err;
+		
+Warning := FALSE;
+Waiting := FALSE;
+FOR i := 1 TO ErrMaxBits BY 1 DO
+	IF f1[i] THEN
+		IF 		Errors1[i].Prio <= ErrZyl 			THEN Fault := TRUE;
+		ELSIF	Errors1[i].Prio <= ErrEndl 			THEN Waiting := TRUE; f1[i] := FALSE;
+		ELSIF	Errors1[i].Prio <= ErrWechselpos	THEN Warning := TRUE; f1[i] := FALSE; END_IF
+	END_IF
+END_FOR
+
+
+(* report Error, Waiting and Warning to cell RT1 *)
+IF Fault 	THEN io_RtFault1 	:= SETBIT32( io_RtFault1,   RtStNr1 ); END_IF
+IF Waiting 	THEN io_RtWaiting1 	:= SETBIT32( io_RtWaiting1, RtStNr1 ); END_IF
+IF Warning	THEN io_RtWarning1	:= SETBIT32( io_RtWarning1, RtStNr1 ); END_IF
+
+(* report Error, Waiting and Warning to cell RT2 *)
+IF Fault 	THEN io_RtFault2 	:= SETBIT32( io_RtFault2,   RtStNr2 ); END_IF
+IF Waiting 	THEN io_RtWaiting2 	:= SETBIT32( io_RtWaiting2, RtStNr2 ); END_IF
+IF Warning	THEN io_RtWarning2	:= SETBIT32( io_RtWarning2, RtStNr2 ); END_IF
+
+(* Create Errrors / Misc. Errors *)
+
+
+(* __________________________________ *)
+(* -- Station - Allowed to Operate -- *)
+Betrieb := 	Bedieneinheit.betrieb
+		AND NOT Fault
+		AND NOT ManualRun
+		AND BedienEinheit.ventile_ok;
+
+
+(* ____________________ *)
+(* -- Start Station on RT1-- *)
+IF 	RtStartimpuls1 THEN
+	StartCondition1 
+		:= 	StatEin
+		AND	(arrCarrierData[RtNr1][RtStNr1][Nest1].PartDataPcb.teilestatus = srgood
+		OR	arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus = srgood
+		OR	arrCarrierData[RtNr1][RtStNr1][Nest3].PartDataPcb.teilestatus = srgood
+		OR	arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus = srgood);
+					
+	IF StartCondition1 THEN bStart1 := TRUE; END_IF
+END_IF
+
+(* -- Start Station on RT2-- *)
+IF 	RtStartimpuls2 THEN
+	StartCondition2 
+		:= 	StatEin
+		AND	(arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.teilestatus > srEmpty AND NOT arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.Mo20_St020.TestPart)
+		AND	(arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.teilestatus > srEmpty AND NOT arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.Mo20_St020.TestPart);					
+	IF StartCondition2 THEN bStart2 := TRUE; END_IF
+END_IF
+
+
+(* ________________ *)
+(* -- Step-Chain -- *)
+xx( iStep := Schritt );
+
+(* reset flags *)
+SWI := FALSE;
+
+CASE Schritt OF
+0:	xx.x := 'in basepos. - wait for prework or station´s start';
+	IF  AllInPos
+	AND bStart1
+	AND BedienEinheit.anl_ein
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+
+10:	xx.x := 'MM9 quer. Stroke -> ON (advanced)';
+//	bPickPosi1:=TRUE;
+	IF 	AllInPos
+	AND Betrieb THEN
+		IF arrCarrierData[RtNr1][RtStNr1][Nest1].PartDataPcb.teilestatus=srgood OR arrCarrierData[RtNr1][RtStNr1][Nest3].PartDataPcb.teilestatus=srgood THEN
+			bPickPosi1 :=TRUE;
+			bVacuumOn1:=arrCarrierData[RtNr1][RtStNr1][Nest1].PartDataPcb.teilestatus=srgood;
+			bVacuumOn2:=arrCarrierData[RtNr1][RtStNr1][Nest3].PartDataPcb.teilestatus=srgood;
+			Schritt := Schritt + 5;
+			SWI := TRUE;
+		ELSIF arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus=srgood OR arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus=srgood THEN			
+			bPickPosi1 :=FALSE;	
+			bVacuumOn1:=arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus=srgood;
+			bVacuumOn2:=arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus=srgood;
+			Schritt := Schritt + 10;
+			SWI := TRUE;
+		ELSE
+			bPickPosi1 :=FALSE;	
+			Schritt := 200;
+			SWI := TRUE;
+			bstart1:=FALSE;
+			bVacuumOn1:=FALSE;
+			bVacuumOn2:=FALSE;
+			bSuckedFailed1		:=FALSE;
+			bSuckedFailed2		:=FALSE;
+		END_IF 
+		
+	END_IF
+
+15: xx.x := 'MM9  -> ON ';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+		
+	END_IF	
+
+
+	
+20:	xx.x := 'MM7 Vertical -> ON (downwards)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		bSuckedFailed1		:=FALSE;
+		bSuckedFailed2		:=FALSE;
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+		
+	END_IF	
+
+	
+30:	xx.x := 'MM1 MM2 Vacuum -> ON (suck part)';
+	IF 	AllInPos
+	AND Betrieb 
+	AND (tonVacuumOn.q OR ((ix_CheckVacuum_1 OR NOT bVacuumOn1) AND (ix_CheckVacuum_2 OR NOT bVacuumOn2)))
+ 	THEN
+		IF  bPickPosi1 THEN
+			IF bVacuumOn1 THEN
+			dataHandling[NEST1] := arrCarrierData[RtNr1][RtStNr1][Nest1].PartDataPcb;
+			arrCarrierData[RtNr1][RtStNr1][Nest1].PartDataPcb.init();
+			END_IF
+			IF bVacuumOn2 THEN
+			dataHandling[NEST2] := arrCarrierData[RtNr1][RtStNr1][Nest3].PartDataPcb;
+			arrCarrierData[RtNr1][RtStNr1][Nest3].PartDataPcb.init();
+			END_IF
+		ELSE
+			IF bVacuumOn1 THEN
+			dataHandling[NEST1] := arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb;
+			arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.init();
+			END_IF
+			IF bVacuumOn2 THEN
+			dataHandling[NEST2] := arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb;
+			arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.init();
+			END_IF
+		END_IF
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF		
+	
+	
+40:	xx.x := 'MM7 Vertical -> OFF (upwards)';							//check the pressure after vertical arriving upside, then remove the pcb from cavity is possible by hand.
+	xx.xx := 'waiting for Vacuum Pressure Checking';
+	IF 	AllInPos
+	AND Betrieb  THEN
+		IF  NOT (ix_CheckVacuum_1 AND ix_CheckVacuum_2) THEN 		
+//		IF FALSE THEN	DWOCOM
+			f1[feVacuum_1_Pressure]:=NOT ix_CheckVacuum_1 AND bVacuumOn1;
+			f1[feVacuum_2_Pressure]:=NOT ix_CheckVacuum_2 AND bVacuumOn2;
+			
+			IF f1[feVacuum_1_Pressure] OR NOT bvacuumon1 THEN
+				bSuckedFailed1		:=TRUE;
+				dataHandling[NEST1].init();
+			END_IF
+			IF f1[feVacuum_2_Pressure] OR NOT bvacuumon2 THEN
+				bSuckedFailed2		:=TRUE;
+				dataHandling[NEST2].init();
+			END_IF
+			Schritt := Schritt + 2;
+			SWI := TRUE;
+		ELSE
+			Schritt := Schritt + 2;
+			SWI := TRUE;
+		END_IF
+	END_IF
+			
+41:	xx.x := 'Waiting for ErrorReset';
+	IF 	NOT f1[feVacuum_1_Pressure] 
+	AND NOT f1[feVacuum_2_Pressure] 
+	THEN
+	 	Schritt := Schritt + 1;  
+		SWI := TRUE;
+	END_IF			
+			
+42:	xx.x := 'Waiting for ErrorReset';
+	IF 	AllInPos
+	AND Betrieb  THEN		
+		IF ix_quer_strokeA	 THEN
+			Schritt := Schritt + 8;
+			SWI := TRUE;
+		ELSIF ix_quer_strokeB	 THEN
+			Schritt := Schritt + 3;
+			SWI := TRUE;	
+		END_IF
+	END_IF	
+
+
+45:	xx.x := 'MM9 quer. Stroke -> OFF (retracted)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF	
+	
+	
+50:	xx.x := 'MM8 hori. Stroke -> ON (insert position)';
+	xx.xx:= 'MM5 MM6 hinge cylinder -> ON (pcbs incline) ';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF	
+
+	
+55:	xx.x := 'waiting for Housing in place';
+	IF NOT ix_CheckVacuum_1 AND bVacuumOn1 THEN
+		bSuckedFailed1		:=TRUE;
+	END_IF
+	IF NOT ix_CheckVacuum_2 AND bVacuumOn2 THEN
+		bSuckedFailed2		:=TRUE;
+	END_IF	
+	
+	IF 	AllInPos 
+	AND Betrieb THEN
+		IF (uz.q AND NOT bStart2 )THEN
+			f1[feWaitOffering]	:=TRUE;	
+		ELSIF bStart2 THEN
+			f1[feWaitOffering]	:=FALSE;
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+		END_IF	
+	END_IF
+
+56:xx.x := 'Check Serial number in LineController';
+
+	IF NOT LC_Cavity1.out_bBusy THEN
+		LC_Cavity1.in_Data.SerialNo:= arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTeileId;			//+1 by each cycle
+		LC_Cavity1.in_Data.TypeNo  := arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTypeNr;
+		LC_Cavity1.in_Data.AssyLocation := 0;
+		LC_Cavity1.in_Data.OPcode := ENU_LC_OpCode.checkSNRState;
+		LC_Cavity1.in_bSendTelegram := TRUE;
+	END_IF
+
+	IF LC_Cavity1.out_bBusy AND NOT LC_Cavity1.out_bError THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+		LC_Cavity1.in_bSendTelegram := FALSE;
+	END_IF
+
+57: xx.x := 'Wait for result of OP15 = checkSNRState from LC';
+	IF NOT LC_Cavity1.out_bBusy THEN
+		IF NOT LC_Cavity1.out_bError AND LC_Cavity1.out_Data.ACK_Numer = ENU_LC_Ack_Number.ackSucces THEN
+			(* merge parts *)
+			Schritt := Schritt + 1;
+			SWI := TRUE;
+		ELSE
+			IF LC_Cavity1.out_Data.ACK_Numer = ENU_LC_Ack_Number.ackReserved  THEN // TCP/IP-Fehler
+				Schritt := 56;
+				SWI := TRUE;
+			
+			END_IF
+		END_IF
+	END_IF
+
+58:xx.x := 'Check Serial number in LineController';
+
+	IF NOT LC_Cavity2.out_bBusy THEN
+		LC_Cavity2.in_Data.SerialNo:= arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTeileId;			//+1 by each cycle
+		LC_Cavity2.in_Data.TypeNo  := arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTypeNr;
+		LC_Cavity2.in_Data.AssyLocation := 0;
+		LC_Cavity2.in_Data.OPcode := ENU_LC_OpCode.checkSNRState;
+		LC_Cavity2.in_bSendTelegram := TRUE;
+	END_IF
+
+	IF LC_Cavity2.out_bBusy AND NOT LC_Cavity2.out_bError THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+		LC_Cavity2.in_bSendTelegram := FALSE;
+	END_IF
+
+59: xx.x := 'Wait for result of OP15 = checkSNRState from LC';
+	IF NOT LC_Cavity2.out_bBusy THEN
+		IF NOT LC_Cavity2.out_bError AND LC_Cavity2.out_Data.ACK_Numer = ENU_LC_Ack_Number.ackSucces THEN
+			(* merge parts *)
+			Schritt := Schritt + 1;
+			SWI := TRUE;
+		ELSE
+			IF LC_Cavity2.out_Data.ACK_Numer = ENU_LC_Ack_Number.ackReserved  THEN // TCP/IP-Fehler
+				Schritt := 58;
+				SWI := TRUE;
+			
+			END_IF
+		END_IF
+	END_IF			
+	
+60:	xx.x := 'MM7 Vertical -> ON (downwards)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+		bInsertFailed:=FALSE;
+	END_IF	
+
+69:	xx.x := 'MM3 MM4 Slide -> OFF (home parts)';
+	IF 	AllInPos
+	AND Betrieb THEN		
+		Schritt := 90;
+		SWI := TRUE;
+		bInsertFailed:=TRUE;
+	END_IF	
+
+	
+70:	xx.x := 'MM3 MM4 Slide -> ON (insert parts)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	ELSIF NOT AllInPos AND uz.Q  THEN
+		Schritt := 69;
+		SWI := TRUE;
+	END_IF	
+
+79:	xx.x := 'MM5 MM6 hinge cylinder -> ON (pcbs incline)';
+	IF 	AllInPos
+	AND Betrieb THEN		
+		Schritt := 69;
+		SWI := TRUE;
+	END_IF	
+	
+80:	xx.x := 'MM5 MM6 hinge cylinder -> OFF (pcbs adjust)';
+	IF 	AllInPos
+	AND Betrieb THEN		
+		IF dataHandling[NEST1].teilestatus = srGood THEN	
+			Schritt := Schritt + 1;
+			SWI := TRUE;
+		ELSE 
+			Schritt := Schritt + 5;
+			SWI := TRUE;
+		END_IF
+			
+	ELSIF NOT AllInPos AND uz.Q AND betrieb THEN
+		Schritt := 79;
+		SWI := TRUE;
+	END_IF	
+
+81: xx.x := 'merge part';
+	LC_Cavity1.mergeParts(
+				arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTeileId,
+				dataHandling[NEST1].strTeileId,1);
+	IF LC_Cavity1.comMergeParts.bDone THEN
+		IF LC_Cavity1.comMergeParts.bValid THEN
+			LC_Cavity1.in_Data.SerialNo2 := ''; (* serial number 2 delete in line controller display *)
+			Schritt := Schritt + 4;
+			SWI := TRUE;			
+		END_IF
+	END_IF
+
+85: xx.x := 'step fpr merge part';
+	IF dataHandling[NEST2].teilestatus = srGood THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	ELSE
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+86: xx.x := 'merge part';
+	LC_Cavity2.mergeParts(
+				arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTeileId,
+				dataHandling[NEST2].strTeileId,1);
+	IF LC_Cavity2.comMergeParts.bDone THEN
+		IF LC_Cavity2.comMergeParts.bValid THEN
+			LC_Cavity2.in_Data.SerialNo2 := ''; (* serial number 2 delete in line controller display *)
+			Schritt := Schritt + 4;
+			SWI := TRUE;
+		END_IF
+	END_IF
+	
+90:	xx.x := 'MM1 MM2 Vacuum -> OFF (put parts)';
+	IF 	AllInPos
+	AND Betrieb THEN
+		Schritt := Schritt + 5;
+		bVacuumOn1:=FALSE;
+		bVacuumOn2:=FALSE;
+		SWI := TRUE;
+	END_IF		
+
+95:	xx.x := 'Saving Data of Insert Result and PCB Information';
+	IF 	AllInPos
+	AND Betrieb 	
+ 	THEN
+		arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.StNrLast						:= StNr;
+		arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.StNrLast						:= StNr;
+		(*saving the data of insert result*)
+		IF ( bInsertFailed OR bSuckedFailed1) //OR arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.Mo20_St010.GMPartSWVersion<>arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.Mo20_St050.in_PCB_Daten.Mo20_St052.sProgramVersion)
+		THEN 			
+			awInsertNOK_1.ischl:=TRUE;
+			arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.teilestatus				:= srBad;				
+			arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.StNrSchlechtGesetzt		:= StNr;
+			arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.iFehlercode				:= bcM20_St050_PCBInsertFailed_1; 			//declaration in gvl_machineconfig
+			
+			BDEIncCounter( FALSE, bcM20_St050_PCBInsertFailed_1, 1, ActOrd[MPart].ord_id, MPart);
+			BDEIncCounter( TRUE	, bcM20_St050_PCBInsertFailed_1, 1, ActOrd[MPart].ord_id, MPart);
+		ELSE
+			awInsertNOK_1.igut:=TRUE;
+			arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.Mo20_St050.bPCBInsertedOK:=TRUE;
+			arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.Mo20_St050.in_PCB_Daten:=dataHandling[NEST1];
+			dataHandling[NEST1].Init();
+		END_IF
+	
+		IF ( bInsertFailed OR bSuckedFailed2) //OR arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.Mo20_St010.GMPartSWVersion<>arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.Mo20_St050.in_PCB_Daten.Mo20_St052.sProgramVersion)
+		THEN 
+			awInsertNOK_2.ischl:=TRUE;			
+			arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.teilestatus				:= srBad;						
+			arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.StNrSchlechtGesetzt		:= StNr;
+			arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.iFehlercode				:= bcM20_St050_PCBInsertFailed_2; 		
+			
+			BDEIncCounter( FALSE, bcM20_St050_PCBInsertFailed_2, 1, ActOrd[MPart].ord_id, MPart);
+			BDEIncCounter( TRUE	, bcM20_St050_PCBInsertFailed_2, 1, ActOrd[MPart].ord_id, MPart);
+		ELSE
+			awInsertNOK_1.igut:=TRUE;
+			arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.Mo20_St050.bPCBInsertedOK:=TRUE;
+			arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.Mo20_St050.in_PCB_Daten:=dataHandling[NEST2];
+			dataHandling[NEST2].Init();
+		END_IF
+		
+		IF arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.Mo20_St050.in_PCB_Daten.teilestatus <= srBad THEN
+			arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.teilestatus :=srBad;
+			arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.StNrSchlechtGesetzt		:= StNr;
+			arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.iFehlercode				:= bcM20_St050_NOKPCB; 													
+		END_IF
+		
+		IF arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.Mo20_St050.in_PCB_Daten.teilestatus <= srBad THEN
+			arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.teilestatus :=srBad;
+			arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.StNrSchlechtGesetzt		:= StNr;
+			arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.iFehlercode				:= bcM20_St050_NOKPCB; 										
+		END_IF
+		
+		f1[feVacuum_1_Pressure] :=FALSE;
+		f1[feVacuum_2_Pressure] :=FALSE;
+		bSuckedFailed1		:=FALSE;
+		bSuckedFailed2		:=FALSE;
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+(*Step for Line Controller Upload*)	
+96: xx.xx:= 'LineController socket ready';
+	IF	NOT LC_Cavity1.out_bBusy THEN
+
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+97:xx.x := 'Upload result to LC';
+	IF (arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.teilestatus = srGood) THEN
+		LC_Cavity1.UploadStateAndResultData(	arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTypeNr,
+										arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+	ELSIF (arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.iFehlercode = bcM20_St050_PCBInsertFailed_1) THEN
+		LC_Cavity1.UploadStateAndResultData(	arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTypeNr,
+										arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTeileId,
+										bcM20_St050_PCBInsertFailed_1,(*Fail_Location*)
+										LCID_FAIL_Assembly//LCID_FAIL_PRESENCE(*Fail_Type*) 
+									);
+	ELSIF (arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.iFehlercode = bcM20_St050_NOKPCB) THEN
+		LC_Cavity1.UploadStateAndResultData(	arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTypeNr,
+										arrCarrierData[RtNr2][RtStNr2][Nest1].PartData.strTeileId,
+										bcM20_St050_NOKPCB,(*Fail_Location*)
+										LCID_FAIL_Assembly//LCID_FAIL_PRESENCE(*Fail_Type*) 
+									);
+	END_IF
+	IF (LC_Cavity1.comUploadStateAndResultData.bStarted OR LC_Cavity1.comUploadStateAndResultData.bDone) THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF;	
+	
+98: xx.xx:= 'LineController socket ready';
+	IF	NOT LC_Cavity2.out_bBusy THEN
+
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+
+99:xx.x := 'Upload result to LC';
+	IF (arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.teilestatus = srGood) THEN
+		LC_Cavity2.UploadStateAndResultData(	arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTypeNr,
+										arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTeileId,
+										0,(*Fail_Location*)
+										0(*Fail_Type*)
+									);
+	ELSIF (arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.iFehlercode = bcM20_St050_PCBInsertFailed_2) THEN
+		LC_Cavity2.UploadStateAndResultData(	arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTypeNr,
+										arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTeileId,
+										bcM20_St050_PCBInsertFailed_2,(*Fail_Location*)
+										LCID_FAIL_Assembly//LCID_FAIL_PRESENCE(*Fail_Type*)
+									);
+	ELSIF (arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.iFehlercode = bcM20_St050_NOKPCB) THEN
+		LC_Cavity2.UploadStateAndResultData(	arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTypeNr,
+										arrCarrierData[RtNr2][RtStNr2][Nest2].PartData.strTeileId,
+										bcM20_St050_NOKPCB,(*Fail_Location*)
+										LCID_FAIL_Assembly//LCID_FAIL_PRESENCE(*Fail_Type*)
+									);
+	END_IF
+	IF (LC_Cavity2.comUploadStateAndResultData.bStarted OR LC_Cavity2.comUploadStateAndResultData.bDone) THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF;	
+	
+100:xx.x := 'MM7 Vertical -> OFF (upwards)';
+	IF 	AllInPos
+	AND Betrieb  THEN
+		bStart2:=FALSE;
+		IF 		arrCarrierData[RtNr1][RtStNr1][Nest1].PartDataPcb.teilestatus <> srgood
+			AND	arrCarrierData[RtNr1][RtStNr1][Nest3].PartDataPcb.teilestatus <> srgood
+			AND	(arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus = srgood OR arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus = srgood)
+		THEN
+		bPickPosi1 :=FALSE;
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+		ELSE
+		bPickPosi1 := FALSE;
+		Schritt := 200;
+		SWI := TRUE;
+		END_IF
+	END_IF
+
+
+110:xx.x := 'MM3 MM4 Slide -> OFF (home position)';
+	xx.xx:= 'MM8 hori. Stroke -> OFF (home position) ';
+	IF 	AllInPos
+	AND Betrieb 
+	AND ix_quer_strokeA	THEN
+		Schritt := 10;
+		bInsertFailed:=FALSE;
+		SWI := TRUE;
+	END_IF		
+				
+	
+200:xx.x := 'MM3 MM4 Slide -> OFF (home part)';
+	xx.xx:= 'MM8 hori. Stroke -> OFF (home position) ';
+	IF 	AllInPos
+	AND Betrieb  THEN
+		bStart1 := FALSE;
+		Schritt := 0;
+		bInsertFailed:=FALSE;
+		SWI := TRUE;
+	END_IF			
+
+END_CASE
+
+
+(* -- Error by cleaning X-times in a Row -- *)
+awInsertNOK_1( cntmax	:= FehlStop[OrderNr] );
+IF awInsertNOK_1.fehler THEN f1[feawInsertNOKNest1] := TRUE; END_IF
+awInsertNOK_1.igut	:= FALSE; 
+awInsertNOK_1.ischl	:= FALSE; 
+
+awInsertNOK_2( cntmax	:= FehlStop[OrderNr] );
+IF awInsertNOK_2.fehler THEN f1[feawInsertNOKNest2] := TRUE; END_IF
+awInsertNOK_2.igut	:= FALSE; 
+awInsertNOK_2.ischl	:= FALSE; 
+
+(* ____________________ *)
+(* -- React to Steps -- *)
+IF NOT ManualRun THEN
+	zyl0_pnp_Vacuum1.on 		:= 	( (Schritt >= 30) AND (Schritt < 90) AND bvacuumon1 );
+	zyl0_pnp_Vacuum2.on 		:= 	( (Schritt >= 30) AND (Schritt < 90) AND bvacuumon2 );	
+
+	zyl2_slide1.on 			:= (( (Schritt >= 70) AND (Schritt < 110) AND (arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus > srEmpty AND arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus > srEmpty))
+							 OR ( (Schritt >= 70) AND (Schritt < 200) AND (arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus < srGood AND arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus < srGood)))AND (bInsertFailed = FALSE);
+	zyl2_slide2.on 			:= (( (Schritt >= 70) AND (Schritt < 110) AND (arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus > srEmpty AND arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus > srEmpty))
+							 OR ( (Schritt >= 70) AND (Schritt < 200) AND (arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus < srGood AND arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus < srGood)))AND (bInsertFailed = FALSE);	
+
+	zyl2_hinge1.on 			:= 	( (Schritt >= 50) AND (Schritt < 80) ) OR (bInsertFailed = TRUE);
+	zyl2_hinge2.on 			:= 	( (Schritt >= 50) AND (Schritt < 80) ) OR (bInsertFailed = TRUE);
+	
+	zyl2_vertical_stroke.on 	:= 	( (Schritt >= 20) AND (Schritt < 40) )
+							  OR	( (Schritt >= 60) AND (Schritt < 100) );		
+
+	zyl2_horizontal_stroke.on := ( (Schritt >= 50) AND (Schritt < 110) AND (arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus > srEmpty AND arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus > srEmpty))
+							  OR ( (Schritt >= 50) AND (Schritt < 200) AND (arrCarrierData[RtNr1][RtStNr1][Nest2].PartDataPcb.teilestatus < srGood AND arrCarrierData[RtNr1][RtStNr1][Nest4].PartDataPcb.teilestatus < srGood));
+	
+	zyl2_quer_stroke.on := 	(Schritt = 10 AND bPickPosi1) OR (((Schritt > 10) AND (Schritt < 45))AND bPickPosi1 );
+	
+	out_bPartinHandling := (Schritt >= 40) AND (Schritt < 95) AND (dataHandling[NEST1].teilestatus > srEmpty OR dataHandling[NEST2].teilestatus > srEmpty);
+END_IF
+
+
+(* _____________________________________ *)
+(* -- Stop Roundtable 1 Condition-Based -- *)
+IF  NOT (zyl2_vertical_stroke.a AND NOT zyl2_vertical_stroke.b	AND NOT zyl2_vertical_stroke.y)
+	AND (zyl2_horizontal_stroke.a AND NOT zyl2_horizontal_stroke.b	AND NOT zyl2_horizontal_stroke.y) 
+THEN 
+	F_ResetFrgRtWithText(TRUE, RtNr1, RtStNr1, '050MM7 §Vertical§ §not§ §in§ §base-pos.§', io_RtFreigabe1);
+END_IF
+
+(* -- Stop Roundtable 2 Condition-Based -- *)
+IF  NOT (zyl2_vertical_stroke.a AND NOT zyl2_vertical_stroke.b	AND NOT zyl2_vertical_stroke.y)
+	AND (zyl2_horizontal_stroke.b AND NOT zyl2_horizontal_stroke.a	AND NOT zyl2_horizontal_stroke.y) 
+THEN 
+	F_ResetFrgRtWithText(TRUE, RtNr2, RtStNr2, '050MM7 §Vertical§ §not§ §in§ §base-pos.§', io_RtFreigabe1);
+END_IF
+
+(* ______________________________________ *)
+(* -- Report Station is working on RT1  -- *)
+io_RtStarts1 := CSETBIT32(io_RtStarts1, RtStNr1, bStart1);
+
+(* -- Report Station is working on RT2  -- *)
+io_RtStarts2 := CSETBIT32(io_RtStarts2, RtStNr2, bStart2);
+
+
+(* _________________ *)
+(* -- Set outputs -- *)
+IF ManualRun THEN (* assign cylinderoutputs .y (by "AND Bedieneinheit.ventile_ok") *)
+	_050_M20_MP1_QM1_X1			:= 	zyl0_pnp_Vacuum1.y	AND BedienEinheit.notaus_ok;
+	_050_M20_MP1_QM2_X1			:= 	zyl0_pnp_Vacuum2.y	AND BedienEinheit.notaus_ok;
+	_050_M20_MP1_WZ2_QM3_MB1	:= 		zyl2_slide1.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM3_MB2	:=	NOT	zyl2_slide1.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM4_MB1	:= 		zyl2_slide2.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM4_MB2	:=	NOT	zyl2_slide2.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM5_MB1	:= 		zyl2_hinge1.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM5_MB2	:=	NOT	zyl2_hinge1.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM6_MB1	:= 		zyl2_hinge2.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM6_MB2	:=	NOT	zyl2_hinge2.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM7_MB1	:= 		zyl2_vertical_stroke.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM7_MB2	:=	NOT	zyl2_vertical_stroke.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM8_MB1	:= 		zyl2_horizontal_stroke.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM8_MB2	:=	NOT	zyl2_horizontal_stroke.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM9_MB1	:= 		zyl2_quer_stroke.y	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM9_MB2	:=	NOT	zyl2_quer_stroke.y	AND Bedieneinheit.ventile_ok;
+ELSE (* assign cylinderoutputs .on (by "AND Bedieneinheit.ventile_ok") *)
+	_050_M20_MP1_QM1_X1			:= 	zyl0_pnp_Vacuum1.on	AND BedienEinheit.notaus_ok;
+	_050_M20_MP1_QM2_X1			:= 	zyl0_pnp_Vacuum2.on	AND BedienEinheit.notaus_ok;
+	_050_M20_MP1_WZ2_QM3_MB1	:= 		zyl2_slide1.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM3_MB2	:=	NOT	zyl2_slide1.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM4_MB1	:= 		zyl2_slide2.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM4_MB2	:=	NOT	zyl2_slide2.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM5_MB1	:= 		zyl2_hinge1.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM5_MB2	:=	NOT	zyl2_hinge1.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM6_MB1	:= 		zyl2_hinge2.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM6_MB2	:=	NOT	zyl2_hinge2.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM7_MB1	:= 		zyl2_vertical_stroke.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM7_MB2	:=	NOT	zyl2_vertical_stroke.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM8_MB1	:= 		zyl2_horizontal_stroke.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM8_MB2	:=	NOT	zyl2_horizontal_stroke.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM9_MB1	:= 		zyl2_quer_stroke.on	AND Bedieneinheit.ventile_ok;
+	_050_M20_MP1_WZ2_QM9_MB2	:=	NOT	zyl2_quer_stroke.on	AND Bedieneinheit.ventile_ok;
+END_IF
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="Mo20_St50_transfer_and_assemble_the_pcb">
+      <LineId Id="12700" Count="497" />
+      <LineId Id="13895" Count="0" />
+      <LineId Id="13897" Count="0" />
+      <LineId Id="13899" Count="1" />
+      <LineId Id="13898" Count="0" />
+      <LineId Id="13896" Count="0" />
+      <LineId Id="13894" Count="0" />
+      <LineId Id="13198" Count="427" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

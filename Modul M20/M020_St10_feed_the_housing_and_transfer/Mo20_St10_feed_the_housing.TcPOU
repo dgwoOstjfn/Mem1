@@ -1,0 +1,940 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="Mo20_St10_feed_the_housing" Id="{cf7fc4d8-7504-4ffa-ab37-7d606615d066}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK Mo20_St10_feed_the_housing
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<DESC>
+=INSERT DESCRIPTION FROM WORKFLOWPLAN=
+</DESC>
+
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-11-06	|	1.00	|	DWO		|	initial version
+
+</CHANGES>
+<VERSION>
+1.00
+</VERSION>
+
+<DEPENDENCIES>
+;
+</DEPENDENCIES>
+
+
+
+ -- overview of areas for steps --
+Steps [000..099]: 	Feed
+Steps [100..199]:	Offer
+  
+----------------------------------------------------------------------------------------*)
+
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	OrderNr: 			INT :=1;		(* Nr. Actorder *)
+	MoNr: 				INT:= 020;		(* Module-Number *)
+	StNr: 				INT:= 10;		(* Stationsnumber *)
+	BedienEinheit: 		ZENTR_DATA;		(* Central *)
+	FaultID: 			BYTE := 0;		(* ID for Error Array *)
+	DisplayNr: 			INT := 1;		(* Number of Textdisplay *)
+	MPart: 				INT := 1;		(* Machinepart *)
+	in_InitChainTxt:	STRING(39);		(* String for Step Chain Diagnosis *)
+	in_sKebaKurz:		STRING(gcKebaStKurzLen) := '1234567890'; (* optional - can also be assigned in initialisation paragraph *)
+	in_sKebaBez:		STRING(gcKebaStBezLen) 	:= '11111111112222222222333333333344444444445555555555'; (* optional - can also be assigned in initialisation paragraph *)
+END_VAR
+
+
+
+(* _______________________________ *)
+(* -- Handshake with RT-Station -- *)
+VAR_INPUT PERSISTENT
+	in_bEnablePrework		:BOOL:=FALSE;
+	in_bReadyToTakeOver		:BOOL:=FALSE;
+	in_bTakenOver			:BOOL:=FALSE;
+END_VAR
+VAR_OUTPUT PERSISTENT
+	out_bOffering			:BOOL:=FALSE;
+	out_bOfferEnd			:BOOL:=FALSE;
+END_VAR
+
+
+(* __________________ *)
+(* -- RT-Interface -- *)
+VAR_INPUT
+	RtStNr					:SINT := 02;
+END_VAR
+VAR_IN_OUT
+	io_RtFault				:DWORD; // bit array (dword) representing error at RtStNr of roundtable
+	io_RtWaiting			:DWORD; // bit array (dword) representing waiting at RtStNr of roundtable
+	io_RtWarning			:DWORD; // bit array (dword) representing warning at RtStNr of roundtable
+END_VAR
+
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	SWI: 				BOOL := FALSE;	(* Impulse step is changing forward *)
+	SWR:				BOOL := FALSE;	(* Impulse step is changing backwards *)
+	Schritt: 			INT := 0;		(* Current step *)
+	UZ: 				TON;			(* watchtime *)
+	Fault: 				BOOL;			(* Stations Error *)
+	Waiting:			BOOL;			(* Station Waiting *)
+	Warning:			BOOL;			(* Station Warning *)
+	Betrieb: 			BOOL;			(* Enable Steps *)
+	StatEin: 			BOOL;			(* Station on *)
+	AllInPos: 			BOOL;			(* all cylinders in position and not actuated manually *)
+	Active:				BOOL;			(* stepchain is marked as active *)
+	Transport:			BOOL;			(* manual transport is enabled *)
+	InitRun:			BOOL;			(* goto homepos is enabled *)
+	CycleRun:			BOOL;			(* mode for single cycle is enabled *)
+	ManualRun:			BOOL;			(* move cylinders manually is enabled *)
+	BackwardsRun:		BOOL;			(* backwards run is enabled *)
+	tonSeitSwi:			TON;			(* time since last change of step *)
+	tonSeitAllInPos:	TON;			(* time since AllInPos has become TRUE *)
+	i:					INT;			(* index-runner for loops *)
+	xx:					FB_StepTracker;	(* auto record steps *)
+	StatString:			STRING(10);		(* '+MM=SS' *)
+END_VAR
+
+
+
+(* ___________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrEndl,Nr:= 161, Txt:='=010-BG3       '), 	//ErrEndl for rail 1
+	(* Error 02 *)		(Prio := ErrStau,Nr:= 160, Txt:='=010-BG3       '),
+	(* Error 03 *)		(Prio := ErrZyl, Nr:= 153, Txt:='=010-BG3 		'), 
+	(* Error 04 *)		(Prio := ErrEndl,Nr:= 161, Txt:='=010-BG4       '),		 //ErrEndl for rail 2
+	(* Error 05 *)		(Prio := ErrStau,Nr:= 160, Txt:='=010-BG4       '),
+	(* Error 06 *)		(Prio := ErrFw,  Nr:= 162, Txt:='=020-BG7       '), 	 // Bowl feeding early warning
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 153, Txt:='=010-BG4 		'),
+	(* Error 08 *)		(Prio := ErrZyl, Nr:= 161, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/10            '),
+	(* Error 11 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/11            '),
+	(* Error 12 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/12            '),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13            '),
+	(* Error 14 *)		(Prio := ErrMeld, Nr:= 2512, Txt:='St10 Feeder '), //*************** waiting for ReadyToTakenover
+	(* Error 15 *)		(Prio := ErrMeld, Nr:= 2513, Txt:='St10 Feeder '), //*************** waiting for Takenover
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 170, Txt:='020MB1/MB2/MA1 ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ;
+
+END_VAR
+VAR CONSTANT
+	feEndingPos1					:INT := 01;
+	feJamWithoutEndingPos1			:INT := 02;
+	feFktEndingPos1					:INT := 03;
+	feEndingPos2					:INT := 04;
+	feJamWithoutEndingPos2			:INT := 05;
+	feBowlFeederEarlyWarning		:INT := 06;
+	feFktEndingPos2					:INT := 07;
+	(*  ... *)
+	feWaitReadyToTakeOver			:INT:=14;
+	feWaitTakenOver					:INT:=15;
+	feFeederNotLoadedFromIrgFile	:INT := 16;
+END_VAR
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+
+	(* == Cylinders == *)
+	zyl3_partitioning_cross_stroke			:ZYL3AC_B; (* MM6 *)	
+	ix_partitioning_cross_strokeA			:BOOL:=FALSE;
+	ix_partitioning_cross_strokeB			:BOOL:=FALSE;
+	ix_partitioning_cross_strokeC			:BOOL:=FALSE;
+	
+	zyl2_partitioning_intm_stroke			:ZYL2; (* MM7 *)
+	ix_partitioning_intm_strokeA			:BOOL:=FALSE;
+	ix_partitioning_intm_strokeB			:BOOL:=FALSE;	
+	
+	zyl0_fix_cavity1							:ZYL0; (* MM8 *)
+	
+	zyl0_fix_cavity2							:ZYL0; (* MM9 *)
+	
+	zyl2_stopper								:ZYL2; (* MM10 *)
+	ix_stopperA								:BOOL:=FALSE;
+	ix_stopperB								:BOOL:=FALSE;		
+	
+	zyl0_air_blas							:ZYL0;	
+
+	(* == Sensors == *)	
+	ix_feeding_Endpos_cavity1				:BOOL:=FALSE; 	//BG4
+	ix_feeding_Endpos_cavity2				:BOOL:=FALSE;	//BG3
+
+	
+	(* == Feeding == *)
+	ixEndingPos					:BOOL:=FALSE;				//BG5
+	bInTempPos					:BOOL:=FALSE;
+	tonInTempPos				:ton;
+	ixMaxJam					:BOOL:=FALSE;				//BG11
+	fbEndlage1					:TEndlage_V2;
+	fbEndlage2					:TEndlage_V2;
+	ixAufnahmeLevel				:BOOL:=FALSE;				//BG13
+
+	irgmLineFeeder				:IRGM;
+	//irgmBowlFeeder				:IRGM;
+	//irgmBunker					:IRGM;
+
+	qxLfStart					:BOOL:=FALSE;
+	qxBfStart					:BOOL:=FALSE;
+	qxBunkerStart				:BOOL:=FALSE;
+
+	zylBfBlowAir				:ZYL0;
+	tonBfOn						:TON;
+	tofBfOn						:TON;
+	bEnableTimerStopLf			:BOOL:=FALSE; // Enable Timer for Stopping Linefeeder if no feeding needed
+	tonLfStop					:TON; // Timer for stopping linefeeder
+END_VAR
+
+
+
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+END_VAR
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+(* -- Initialisation -- *)
+IF neustart OR g_bOnlineChange THEN
+	StatString 		:= RIGHT(CONCAT( '000',INT_TO_STRING(StNr) ),3); (* three digits station's prefix is being created automatically for station *)
+	in_InitChainTxt := CONCAT( StatString, ' §Zuführung§ §Gehäuse§ ' );
+	in_sKebaKurz	:= CONCAT( StatString, ' None'); // 3+7 digits
+	in_sKebaBez		:= in_InitChainTxt;
+END_IF
+KebaInitStation(
+	Panelnummer		:= gKebaAktPanel,
+	Aktiv			:= TRUE,
+	Kurzbezeichnung	:= in_sKebaKurz,
+	Bezeichnung		:= in_sKebaBez,
+	ManuellAktiv	:= TRUE,
+	RueckwaertsAktiv:= FALSE,
+	GsAktiv			:= FALSE,
+);
+
+(* _______________________________________ *)
+(* -- Entry for Step Sequence Diagnosis -- *)
+InitChain(
+	Step 			:= Schritt,
+	InitialState 	:= TRUE,
+	Fault 			:= Fault,
+	Waiting 		:= Waiting,
+	Warning 		:= Warning,
+	AllInPos 		:= AllInPos,
+	RunOpenDoor 	:= TRUE,
+	Txt 			:= in_InitChainTxt,
+	BedienEinheit 	:= BedienEinheit,
+	Active 			:= Active,
+	Transport 		:= Transport,
+	InitRun 		:= InitRun,
+	CycleRun 		:= CycleRun,
+	ManualRun 		:= ManualRun,
+	BackwardsRun 	:= BackwardsRun);
+InitRun := FALSE;
+
+
+
+(* ____________ *)
+(* -- Inputs -- *)
+
+
+ix_partitioning_cross_strokeA			:= _010_M20_MP1_BG6_A;
+ix_partitioning_cross_strokeB			:= _010_M20_MP1_BG6_B;
+ix_partitioning_cross_strokeC 			:= _010_M20_MP1_BG6_C;
+
+ix_partitioning_intm_strokeA			:=_010_M20_MP1_BG7_A;
+ix_partitioning_intm_strokeB			:=_010_M20_MP1_BG7_B;
+
+ix_stopperA								:=_010_M20_MP1_BG10_A;
+ix_stopperB								:=_010_M20_MP1_BG10_B;
+
+ix_feeding_Endpos_cavity1				:=_010_M20_MP1_BG4;
+ix_feeding_Endpos_cavity2				:=_010_M20_MP1_BG3;
+
+
+ixMaxJam					:=_010_M20_MP1_BG11;		//max stau controll
+ixAufnahmeLevel				:=_010_M20_MP1_BG13;		//if bowl was empty, used to control the motor
+ixEndingPos					:=_010_M20_MP1_BG5;
+(* _______________________ *)
+(* -- Timer / Watchdogs -- *)
+UZ( IN:= NOT SWI AND BedienEinheit.grundbed, PT:= T#5s );
+tonSeitSwi( IN := NOT SWI AND Bedieneinheit.grundbed, PT := t#30d );
+tonSeitAllInPos( IN := AllInPos AND Bedieneinheit.grundbed, PT := t#30d );
+
+
+(* _______________ *)
+(* -- Cylinders -- *)
+
+zyl3_partitioning_cross_stroke( 
+	grundbed	:= Bedieneinheit.grundbed, 
+	a			:= ix_partitioning_cross_strokeA, 
+	b			:= ix_partitioning_cross_strokeB, 
+	c			:= ix_partitioning_cross_strokeC, 
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNr			:= 213, 
+	FNrMan		:= 613, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '6',
+	ID			:= FaultId, 
+	Bild		:= picStandard, 
+);
+
+
+	
+zyl2_partitioning_intm_stroke( 
+	grundbed	:= Bedieneinheit.grundbed, 
+	a			:= ix_partitioning_intm_strokeA, 
+	b			:= ix_partitioning_intm_strokeB, 
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNr			:= 214, 
+	FNrMan		:= 614, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '7' ,
+	ID			:= FaultId, 
+	Bild		:= picStandard, 
+	timeUZ		:= T#5S, 
+ );
+	
+	
+zyl0_fix_cavity1( 
+	enable_man	:= Bedieneinheit.grundbed, 
+	FNrMan		:= 246,  //Bauteil fixieren
+	on_vz		:= T#200MS, 
+	off_vz		:= T#200MS, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '8' ,
+	ID			:= FaultId, 
+	Bild		:= picStandard, 
+);
+	
+
+zyl0_fix_cavity2(
+	enable_man	:= Bedieneinheit.grundbed, 
+	FNrMan		:= 246,  //Bauteil fixieren
+	on_vz		:= T#200MS, 
+	off_vz		:= T#200MS, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '9' ,
+	ID			:= FaultId, 
+	Bild		:= picStandard, 
+);	
+	
+
+zyl2_stopper( 
+	grundbed	:= Bedieneinheit.grundbed, 
+	a			:= ix_stopperA, 
+	b			:= ix_stopperB, 
+	enable_man	:= Bedieneinheit.ventile_ok, 
+	FNr			:= 201, 
+	FNrMan		:= 601, 
+	FAnz		:= DisplayNr,
+	StNr		:= StatString,
+	ZylNr		:= '10' ,
+	ID			:= FaultId, 
+	Bild		:= picStandard, 
+ );
+
+
+zyl0_air_blas( 
+	enable_man		:= Bedieneinheit.ventile_ok,
+	FNrMan			:= 690,
+	on_vz			:= t#0ms,
+	off_vz			:= t#0ms,
+	FAnz			:= DisplayNr,
+	StNr			:= StatString,
+	ZylNr			:= '11',
+	ID				:= FaultId,
+	Bild			:= picStandardSchalterAus,
+	BildB			:= picStandardSchalterEin,
+);
+
+AllInPos :=	zyl3_partitioning_cross_stroke.pos
+		AND zyl2_partitioning_intm_stroke.pos
+		AND zyl0_fix_cavity1.pos
+		AND zyl0_fix_cavity2.pos
+		AND zyl2_stopper.pos;
+
+
+
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID, FAnz:= DisplayNr, EF:= Errors1, F:= f1 );
+
+Fault	:= zyl3_partitioning_cross_stroke.err    (* Error´s of function blocks *)
+		OR zyl2_partitioning_intm_stroke.err
+		OR zyl0_fix_cavity1.err
+		OR zyl0_fix_cavity2.err
+		OR zyl2_stopper.err;	
+
+Warning := FALSE;
+Waiting := FALSE;
+FOR i := 1 TO ErrMaxBits BY 1 DO
+	IF f1[i] THEN
+		IF 		Errors1[i].Prio <= ErrZyl 			THEN Fault := TRUE;
+		ELSIF	Errors1[i].Prio <= ErrEndl 			THEN Waiting := TRUE; f1[i] := FALSE;
+		ELSIF	Errors1[i].Prio <= ErrWechselpos	THEN Warning := TRUE; f1[i] := FALSE; END_IF
+	END_IF
+END_FOR
+
+
+// report Error, Waiting and Warning to cell
+IF Fault 	THEN io_RtFault 	:= SETBIT32( io_RtFault, 	 RtStNr ); END_IF
+IF Waiting 	THEN io_RtWaiting 	:= SETBIT32( io_RtWaiting, RtStNr ); END_IF
+IF Warning	THEN io_RtWarning 	:= SETBIT32( io_RtWarning, RtStNr ); END_IF
+
+
+(* Create Errrors / Misc. Errors *)
+f1[feFeederNotLoadedFromIrgFile] :=	
+			irgmLineFeeder.f_geraet;
+		
+								
+
+
+
+(* _______________________________ *)
+(* -- Ending Position for Parts -- *)
+fbEndlage1(
+	in		:= not ix_feeding_Endpos_cavity1,
+	Stau	:= ixMaxJam,
+
+	enable 	:= 	BedienEinheit.anl_ein
+			AND uz.Q
+			AND in_bEnablePrework,
+	endlvz	:= t#300ms,
+	stauvze	:= t#3s,
+	stauvza	:= t#3s,
+	f_fk	:= f1[feFktEndingPos1],		);
+fbEndlage1.Waiting := FALSE;
+
+fbEndlage2(
+	in		:= NOT ix_feeding_Endpos_cavity2,
+	Stau	:= ixMaxJam,
+
+	enable 	:= 	BedienEinheit.anl_ein
+			AND uz.Q
+			AND in_bEnablePrework,
+	endlvz	:= t#300ms,
+	stauvze	:= t#3s,
+	stauvza	:= t#3s,
+	f_fk	:= f1[feFktEndingPos2],		);
+fbEndlage2.Waiting := FALSE;
+
+f1[feEndingPos1]	:= fbEndlage1.f_endl;
+f1[feEndingPos2]	:= fbEndlage2.f_endl;
+f1[feJamWithoutEndingPos1]	:= fbEndlage1.f_stau;
+f1[feJamWithoutEndingPos2]	:= fbEndlage2.f_stau;
+
+
+
+(* __________________________________ *)
+(* -- Station - Allowed to Operate -- *)
+Betrieb := 	Bedieneinheit.betrieb
+		AND NOT Fault
+		AND NOT ManualRun
+		AND BedienEinheit.schutz_ok;
+
+
+(* ________________ *)
+(* -- Step-Chain -- *)
+xx( iStep := Schritt );
+SWI := FALSE;
+out_bOffering := FALSE;
+out_bOfferEnd := FALSE;
+CASE Schritt OF
+
+(* == Schritte [000..099]: Feed == *)
+0:	xx.x := 'in basepos. - wait for prework allowed';
+	IF AllInPos
+	AND Betrieb
+	AND Bedieneinheit.anl_ein
+	AND in_bEnablePrework
+	THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+
+5:	xx.x := 'MM10 Stopper-> ON (retracted)';
+	IF AllInPos
+	//AND NOT ixEndingPos
+	//AND bInTempPos
+	AND ix_feeding_Endpos_cavity1		//DWOCOM
+	THEN
+		Schritt := Schritt + 4;
+		SWI := TRUE;
+	END_IF
+
+9:	xx.x := 'MM10 Stopper -> OFF (advanced)';  
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF
+	
+10:	xx.x := 'Waiting for part1';
+	fbEndlage1.waiting := TRUE;    
+	IF AllInPos
+	AND fbEndlage1.vz
+	AND Betrieb
+	THEN
+		fbEndlage1.waiting := FALSE;
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+
+20:	xx.x := 'MM7 intermediate Cylinder -> ON (advanced)';  
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+
+30:	xx.x := 'MM6 partitioning cross stroke -> Position Cavity 2'; 
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF
+	
+40:	xx.x := 'MM10 Stopper-> ON (retracted)';
+	IF AllInPos
+	AND Betrieb
+	//AND NOT ixEndingPos
+	//AND bInTempPos
+	AND ix_feeding_Endpos_cavity2		//DWOCOM
+	THEN
+		Schritt := Schritt + 4;
+		SWI := TRUE;
+	END_IF
+
+44:	xx.x := 'MM10 Stopper-> OFF (advanced)';
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 1;
+		SWI := TRUE;
+	END_IF		
+	
+45:	xx.x := 'Waiting for part2';
+	fbEndlage2.waiting := TRUE;
+	IF AllInPos
+	AND fbEndlage2.vz
+	AND Betrieb
+	THEN
+		fbEndlage2.waiting := FALSE;
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+	
+
+50:	xx.x := 'MM6 partitioning cross stroke -> Home Position';
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+		
+55:	xx.x := 'MM7 intermediate Cylinder -> OFF (retracted)';
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF
+	
+60:	xx.x := 'MM6 partitioning cross stroke -> Partitioning Position';
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+	
+70:	xx.x := 'MM8 MM9 locking Cylinder -> ON (parts fix)'; 
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF		
+	
+
+75:	xx.x := 'waiting for Ready to takeover '; 
+	out_bOffering	:=TRUE;
+	IF AllInPos
+	AND Betrieb 
+	AND in_bReadyToTakeOver THEN
+		(*IF (uz.q AND NOT in_bReadyToTakeOver )THEN
+			f1[feWaitReadyToTakeOver]	:=TRUE;	
+		ELSIF in_bReadyToTakeOver THEN
+			f1[feWaitReadyToTakeOver]	:=FALSE;
+			Schritt := Schritt + 5;
+			SWI := TRUE;
+			out_bOffering :=FALSE;
+		END_IF*)
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+		out_bOffering :=FALSE;
+	END_IF	
+
+80:	xx.x := 'MM8 MM9 locking Cylinder -> OFF (Parts release)';
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := Schritt + 5;
+		SWI := TRUE;
+	END_IF	
+
+85:	xx.x := 'waiting for End of Takenover';
+	out_bOfferEnd :=TRUE;
+	IF AllInPos
+	AND Betrieb THEN
+		IF (uz.q AND NOT in_bTakenOver )THEN
+			f1[feWaitTakenOver]	:=TRUE;	
+		ELSIF in_bTakenOver THEN
+			f1[feWaitTakenOver]	:=FALSE;
+			Schritt := Schritt + 5;
+			SWI := TRUE;
+			out_bOfferEnd :=FALSE;
+		END_IF
+	END_IF	
+	
+90:	xx.x := 'MM6 partitioning cross stroke -> Position Cavity 1';
+	IF AllInPos
+	AND Betrieb
+	THEN
+		Schritt := 0;
+		SWI := TRUE;
+	END_IF	
+
+END_CASE
+
+bInTempPos:=ixEndingPos;
+
+(* ____________________ *)
+(* -- React to Steps -- *)
+IF NOT ManualRun THEN
+	
+	zyl3_partitioning_cross_stroke.zwischen 		:= 	( (Schritt >= 30) AND (Schritt < 50) );
+							
+	zyl3_partitioning_cross_stroke.on				:= 	( (Schritt >= 60) AND (Schritt < 90) );
+								
+	zyl2_partitioning_intm_stroke.on				:= 	( (Schritt >= 20) AND (Schritt < 55) );
+							
+	zyl0_fix_cavity1.on 							:= 	( (Schritt >= 70) AND (Schritt < 80) );
+							
+	zyl0_fix_cavity2.on 							:= 	( (Schritt >= 70) AND (Schritt < 80) );
+	
+	zyl2_stopper.on 								:= 	( (Schritt >= 40) AND (Schritt < 44) )
+												OR 	( (Schritt >= 5) AND (Schritt < 9) );
+
+	(*zyl0_air_blas.on								:=	( (Schritt >= 10) AND (Schritt < 20) )   //Blasing starts by Stopper->ON, ends by BG3/4
+												OR 	( (Schritt >= 45) AND (Schritt < 50) );*)
+
+END_IF
+
+
+(* ______________ *)
+(* -- Feeder's -- *)
+(* Turn of linear feeders when feeding not needed by timer *)
+bEnableTimerStopLf := TRUE;
+IF SWI THEN 			bEnableTimerStopLf := FALSE; END_IF (* Linearförderer wieder einschalten wenn SWI *)
+IF fbEndlage1.in OR fbEndlage2.in THEN	bEnableTimerStopLf := FALSE; END_IF (* Linearförderer wieder einschalten wenn Teil nicht vorhanden *)
+IF ixMaxJam THEN		bEnableTimerStopLf := FALSE; END_IF (* Linearförderer wieder einschalten wenn Maxstau frei *)
+tonLfStop(	 IN := 		bEnableTimerStopLf, PT := T#120S );
+
+irgmLineFeeder(
+	MoNr	:= MoNr,
+	StNr	:= StNr/10,
+	nr		:= 1,
+	sensor	:= TRUE,
+	frg		:= 	BedienEinheit.hm_regel
+			AND NOT tonLfStop.Q
+			AND (in_bEnablePrework OR Schritt > 0),
+	Bereit	:= TRUE	);
+
+(*irgmBowlFeeder(
+	MoNr	:= MoNr,
+	StNr	:= StNr/10,
+	nr		:= 2,
+	frg		:= 	BedienEinheit.hm_regel
+			AND NOT tonLfStop.Q
+			AND (in_bEnablePrework OR Schritt > 0),
+	Bereit	:= TRUE,
+	sensor	:= ixMaxJam	);
+tonBfOn( IN := irgmBowlFeeder.ansteuer, PT := T#100MS );
+tofBfOn( IN := irgmBowlFeeder.ansteuer, PT := T#1S );
+f1[feBowlFeederEarlyWarning] := irgmBowlFeeder.f_fw AND Bedieneinheit.anl_ein;
+zylBfBlowAir.on := tofBfOn.Q;
+*)
+
+qxLfStart		:= irgmLineFeeder.ansteuer;
+//qxBfStart 		:= irgmBowlFeeder.ansteuer AND tonBfOn.Q;
+
+
+(* _________________ *)
+(* -- Set outputs -- *)
+
+_QX_42_5    		:= ((irgmLineFeeder.ansteuer OR ActOrd[MPart].ord_stat[OrderNr].sd_z2) AND ActOrd[MPart].ord_stat[OrderNr].sd_ein AND Betrieb )OR (ActOrd[MPart].ord_stat[OrderNr].sd_z2 AND Bedieneinheit.ventile_ok);	(* dwocom Enable Feeder *)
+zyl0_air_blas.on	:=_QX_42_5;
+
+//_010_M20_MP1_TA2_IN   		:= irgmBowlFeeder.ansteuer;	(* Enable Feeder *)
+
+
+IF ManualRun THEN (* assign cylinderoutputs .y (by "AND Bedieneinheit.ventile_ok") *)
+	_010_M20_MP1_WZ6_QM6_MB1		:=		zyl3_partitioning_cross_stroke.y and Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM6_MB2		:=	not zyl3_partitioning_cross_stroke.y and Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_WZ6_QM7_MB1		:=		zyl2_partitioning_intm_stroke.y	 and Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM7_MB2		:=	not zyl2_partitioning_intm_stroke.y	 and Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_WZ6_QM8_MB1		:=		zyl0_fix_cavity1.y	and Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM8_MB2		:=	not zyl0_fix_cavity1.y	and Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_WZ6_QM9_MB1		:=		zyl0_fix_cavity2.y	and Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM9_MB2		:=	not zyl0_fix_cavity2.y	and Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_WZ6_QM10_MB1		:=		zyl2_stopper.y	and Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM10_MB2		:=	not zyl2_stopper.y	and Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_QM11_MB1			:=		zyl0_air_blas.y	AND Bedieneinheit.ventile_ok;
+	_010_M20_MP1_QM11_MB2			:=	NOT zyl0_air_blas.y	AND Bedieneinheit.ventile_ok;
+;
+ELSE (* assign cylinderoutputs .on (by "AND Bedieneinheit.ventile_ok") *)
+	_010_M20_MP1_WZ6_QM6_MB1		:=		(zyl3_partitioning_cross_stroke.on OR zyl3_partitioning_cross_stroke.zwischen) AND Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM6_MB2		:=	NOT (zyl3_partitioning_cross_stroke.on OR zyl3_partitioning_cross_stroke.zwischen) AND Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_WZ6_QM7_MB1		:=		zyl2_partitioning_intm_stroke.on AND Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM7_MB2		:=	NOT zyl2_partitioning_intm_stroke.on AND Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_WZ6_QM8_MB1		:=		zyl0_fix_cavity1.on	and Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM8_MB2		:=	not zyl0_fix_cavity1.on	and Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_WZ6_QM9_MB1		:=		zyl0_fix_cavity2.on	and Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM9_MB2		:=	not zyl0_fix_cavity2.on	and Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_WZ6_QM10_MB1		:=		zyl2_stopper.on	and Bedieneinheit.ventile_ok;
+	_010_M20_MP1_WZ6_QM10_MB2		:=	not zyl2_stopper.on	and Bedieneinheit.ventile_ok;
+	
+	_010_M20_MP1_QM11_MB1			:=		zyl0_air_blas.on	AND Bedieneinheit.ventile_ok;
+	_010_M20_MP1_QM11_MB2			:=	NOT zyl0_air_blas.on	AND Bedieneinheit.ventile_ok;
+END_IF
+]]></ST>
+    </Implementation>
+    <LineIds Name="Mo20_St10_feed_the_housing">
+      <LineId Id="159" Count="4" />
+      <LineId Id="776" Count="1" />
+      <LineId Id="164" Count="0" />
+      <LineId Id="762" Count="2" />
+      <LineId Id="778" Count="1" />
+      <LineId Id="767" Count="3" />
+      <LineId Id="166" Count="24" />
+      <LineId Id="2522" Count="0" />
+      <LineId Id="191" Count="2" />
+      <LineId Id="1316" Count="0" />
+      <LineId Id="3161" Count="0" />
+      <LineId Id="3160" Count="0" />
+      <LineId Id="3162" Count="0" />
+      <LineId Id="3164" Count="0" />
+      <LineId Id="3163" Count="0" />
+      <LineId Id="3165" Count="0" />
+      <LineId Id="3167" Count="0" />
+      <LineId Id="3166" Count="0" />
+      <LineId Id="3168" Count="0" />
+      <LineId Id="3170" Count="0" />
+      <LineId Id="3169" Count="0" />
+      <LineId Id="194" Count="8" />
+      <LineId Id="4513" Count="0" />
+      <LineId Id="204" Count="1" />
+      <LineId Id="1635" Count="0" />
+      <LineId Id="1607" Count="4" />
+      <LineId Id="1614" Count="2" />
+      <LineId Id="1636" Count="1" />
+      <LineId Id="1619" Count="0" />
+      <LineId Id="1624" Count="1" />
+      <LineId Id="1640" Count="1" />
+      <LineId Id="1606" Count="0" />
+      <LineId Id="1521" Count="0" />
+      <LineId Id="1561" Count="3" />
+      <LineId Id="1566" Count="2" />
+      <LineId Id="1638" Count="0" />
+      <LineId Id="1570" Count="1" />
+      <LineId Id="1575" Count="1" />
+      <LineId Id="1578" Count="0" />
+      <LineId Id="1559" Count="0" />
+      <LineId Id="1584" Count="1" />
+      <LineId Id="1587" Count="0" />
+      <LineId Id="1589" Count="3" />
+      <LineId Id="1671" Count="1" />
+      <LineId Id="1595" Count="0" />
+      <LineId Id="1597" Count="1" />
+      <LineId Id="1586" Count="0" />
+      <LineId Id="1557" Count="0" />
+      <LineId Id="1673" Count="10" />
+      <LineId Id="1560" Count="0" />
+      <LineId Id="1558" Count="0" />
+      <LineId Id="1685" Count="0" />
+      <LineId Id="1688" Count="4" />
+      <LineId Id="2954" Count="0" />
+      <LineId Id="1694" Count="5" />
+      <LineId Id="1686" Count="1" />
+      <LineId Id="1518" Count="0" />
+      <LineId Id="206" Count="11" />
+      <LineId Id="4045" Count="0" />
+      <LineId Id="218" Count="0" />
+      <LineId Id="1730" Count="3" />
+      <LineId Id="219" Count="6" />
+      <LineId Id="1734" Count="3" />
+      <LineId Id="226" Count="0" />
+      <LineId Id="1738" Count="0" />
+      <LineId Id="227" Count="11" />
+      <LineId Id="1133" Count="2" />
+      <LineId Id="242" Count="3" />
+      <LineId Id="1313" Count="0" />
+      <LineId Id="246" Count="0" />
+      <LineId Id="1312" Count="0" />
+      <LineId Id="247" Count="10" />
+      <LineId Id="3823" Count="0" />
+      <LineId Id="258" Count="4" />
+      <LineId Id="1740" Count="0" />
+      <LineId Id="4034" Count="10" />
+      <LineId Id="1741" Count="0" />
+      <LineId Id="263" Count="1" />
+      <LineId Id="4033" Count="0" />
+      <LineId Id="265" Count="0" />
+      <LineId Id="4032" Count="0" />
+      <LineId Id="266" Count="8" />
+      <LineId Id="276" Count="1" />
+      <LineId Id="597" Count="1" />
+      <LineId Id="280" Count="3" />
+      <LineId Id="285" Count="3" />
+      <LineId Id="290" Count="4" />
+      <LineId Id="297" Count="2" />
+      <LineId Id="2726" Count="0" />
+      <LineId Id="2728" Count="1" />
+      <LineId Id="4515" Count="1" />
+      <LineId Id="5144" Count="0" />
+      <LineId Id="2731" Count="2" />
+      <LineId Id="300" Count="0" />
+      <LineId Id="4287" Count="1" />
+      <LineId Id="4290" Count="4" />
+      <LineId Id="2727" Count="0" />
+      <LineId Id="4295" Count="0" />
+      <LineId Id="301" Count="1" />
+      <LineId Id="304" Count="3" />
+      <LineId Id="309" Count="5" />
+      <LineId Id="317" Count="2" />
+      <LineId Id="321" Count="3" />
+      <LineId Id="1961" Count="0" />
+      <LineId Id="1963" Count="4" />
+      <LineId Id="325" Count="0" />
+      <LineId Id="1968" Count="0" />
+      <LineId Id="1970" Count="0" />
+      <LineId Id="1972" Count="1" />
+      <LineId Id="4517" Count="1" />
+      <LineId Id="5145" Count="0" />
+      <LineId Id="1974" Count="2" />
+      <LineId Id="1969" Count="0" />
+      <LineId Id="4297" Count="0" />
+      <LineId Id="4299" Count="5" />
+      <LineId Id="2078" Count="0" />
+      <LineId Id="4298" Count="0" />
+      <LineId Id="2079" Count="0" />
+      <LineId Id="2082" Count="5" />
+      <LineId Id="2089" Count="1" />
+      <LineId Id="1978" Count="0" />
+      <LineId Id="4054" Count="0" />
+      <LineId Id="4062" Count="0" />
+      <LineId Id="4064" Count="5" />
+      <LineId Id="4063" Count="0" />
+      <LineId Id="326" Count="0" />
+      <LineId Id="1987" Count="0" />
+      <LineId Id="1989" Count="5" />
+      <LineId Id="1980" Count="0" />
+      <LineId Id="1996" Count="0" />
+      <LineId Id="1998" Count="4" />
+      <LineId Id="1981" Count="1" />
+      <LineId Id="2003" Count="0" />
+      <LineId Id="2005" Count="4" />
+      <LineId Id="1983" Count="1" />
+      <LineId Id="2010" Count="0" />
+      <LineId Id="2015" Count="0" />
+      <LineId Id="3614" Count="0" />
+      <LineId Id="2017" Count="1" />
+      <LineId Id="4934" Count="0" />
+      <LineId Id="2738" Count="2" />
+      <LineId Id="2019" Count="2" />
+      <LineId Id="3615" Count="0" />
+      <LineId Id="2741" Count="0" />
+      <LineId Id="4936" Count="1" />
+      <LineId Id="4935" Count="0" />
+      <LineId Id="2011" Count="1" />
+      <LineId Id="2023" Count="0" />
+      <LineId Id="2025" Count="1" />
+      <LineId Id="2028" Count="2" />
+      <LineId Id="2013" Count="1" />
+      <LineId Id="2031" Count="0" />
+      <LineId Id="2033" Count="0" />
+      <LineId Id="3616" Count="0" />
+      <LineId Id="2034" Count="0" />
+      <LineId Id="2742" Count="5" />
+      <LineId Id="3617" Count="0" />
+      <LineId Id="2748" Count="0" />
+      <LineId Id="2039" Count="1" />
+      <LineId Id="2045" Count="0" />
+      <LineId Id="2047" Count="1" />
+      <LineId Id="2050" Count="0" />
+      <LineId Id="2734" Count="0" />
+      <LineId Id="2052" Count="0" />
+      <LineId Id="2041" Count="0" />
+      <LineId Id="363" Count="1" />
+      <LineId Id="4933" Count="0" />
+      <LineId Id="366" Count="4" />
+      <LineId Id="2091" Count="0" />
+      <LineId Id="2096" Count="4" />
+      <LineId Id="2102" Count="3" />
+      <LineId Id="2108" Count="2" />
+      <LineId Id="2112" Count="0" />
+      <LineId Id="2318" Count="0" />
+      <LineId Id="2106" Count="0" />
+      <LineId Id="2092" Count="0" />
+      <LineId Id="373" Count="0" />
+      <LineId Id="375" Count="17" />
+      <LineId Id="3826" Count="0" />
+      <LineId Id="394" Count="1" />
+      <LineId Id="4070" Count="11" />
+      <LineId Id="407" Count="10" />
+      <LineId Id="4726" Count="0" />
+      <LineId Id="5352" Count="0" />
+      <LineId Id="418" Count="4" />
+      <LineId Id="3172" Count="15" />
+      <LineId Id="3171" Count="0" />
+      <LineId Id="423" Count="0" />
+      <LineId Id="3188" Count="15" />
+      <LineId Id="424" Count="1" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

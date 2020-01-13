@@ -1,0 +1,477 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="Mo20_St53_vision_sensor" Id="{b82c7ff2-4fcd-4ca8-8d4d-6c92b9c68e11}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK Mo20_St53_vision_sensor
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<DESC>
+The vertical cylinder runs out at the end position turn on the vacuum and the dispensing edge runs in.
+Now positioned the pneumatik pick and place handling the Folie at the Combo Sensor Assembly
+The feed of the carrier strip be broken by a pneumatik cylinder and gripper
+The gripper for feed of the carrier strip open and close when the vertical cylinder is at the fetching position, this process is for tolerance compensation from the carrier strip
+The winders turn always on they have a torque motor and the force for uproll is steplessly adjustable
+In the machine control is adjustable the force and the direction of the rotation from the torque motor
+1 winder for unroll the carrier strip
+1 winder for uproll the carrier strip
+1 winder for uproll the intermediate tape
+</DESC>
+
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-05-09	|	1.00	|	PAM		|	initial version
+
+</CHANGES>
+<VERSION>
+1.00
+</VERSION>
+
+<DEPENDENCIES>
+;
+</DEPENDENCIES>
+
+
+
+ -- overview of areas for steps --
+Steps [000..099]: 	Whatever Block
+Steps [100..199]:	Next Whatever Block
+
+  
+----------------------------------------------------------------------------------------*)
+
+
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	OrderNr: 			INT :=1;		(* Nr. Actorder *)
+	MoNr: 				INT:= 1;		(* Module-Number *)
+	StNr: 				INT:= 1;		(* Stationsnumber *)
+	BedienEinheit: 		ZENTR_DATA;		(* Central *)
+	FaultID: 			BYTE := 0;		(* ID for Error Array *)
+	DisplayNr: 			INT := 1;		(* Number of Textdisplay *)
+	MPart: 				INT := 1;		(* Machinepart *)
+END_VAR
+
+
+(* __________________ *)
+(* -- RT-Interface -- *)
+VAR_INPUT
+	RtNr:				INT  := 01;
+	RtStNr:				SINT := 03;
+END_VAR
+
+VAR_IN_OUT
+	//io_RtRegister:		ARRAY[1..6] OF ARRAY[1..4] OF DataTeil_pcb;  // info for all parts within roundtable - the part for the station is accessed at [RtStNr]
+	io_RtStarts:		DWORD; // bit array (dword) representing station is working on roundtable (flow based)
+	io_RtFreigabe:		DWORD; // bit array (dword) representing station is giving permission for table to move (state based)
+	io_RtFault:			DWORD; // bit array (dword) representing error at RtStNr of roundtable
+	io_RtWaiting:		DWORD; // bit array (dword) representing waiting at RtStNr of roundtable
+	io_RtWarning:		DWORD; // bit array (dword) representing warning at RtStNr of roundtable
+END_VAR
+
+
+
+(* ____________________________ *)
+(* -- Handshake with the other step sequence -- *)
+VAR_INPUT PERSISTENT
+	in_bStartVisionSensor			:BOOL:=FALSE;	(* handshake to pick and place *)
+	bTestVisionSensor				:BOOL:=FALSE;	(* Test Signal for DWOCOM *)
+	in_byteVisionSensorJobNo		:BYTE; 			(* Job 1 number for Vision sensor *)
+END_VAR
+VAR_OUTPUT PERSISTENT
+	out_bVisionSensorRuns	 		:BOOL:=FALSE;   (* handshake from pick and place *)
+END_VAR
+
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	SWI: 				BOOL := FALSE;	(* Impulse step is changing forward *)
+	SWR:				BOOL := FALSE;	(* Impulse step is changing backwards *)
+	Schritt: 			INT := 0;		(* Current step *)
+	UZ: 				TON;			(* watchtime *)
+	Fault: 				BOOL;			(* Stations Error *)
+	Waiting:			BOOL;			(* Station Waiting *)
+	Warning:			BOOL;			(* Station Warning *)
+	Betrieb: 			BOOL;			(* Enable Steps *)
+	StatEin: 			BOOL;			(* Station on *)
+	AllInPos: 			BOOL;			(* all cylinders in position and not actuated manually *)
+	Active:				BOOL;			(* stepchain is marked as active *)
+	Transport:			BOOL;			(* manual transport is enabled *)
+	InitRun:			BOOL;			(* goto homepos is enabled *)
+	CycleRun:			BOOL;			(* mode for single cycle is enabled *)
+	ManualRun:			BOOL;			(* move cylinders manually is enabled *)
+	BackwardsRun:		BOOL;			(* backwards run is enabled *)
+	tonSeitSwi:			TON;			(* time since last change of step *)
+	tonSeitAllInPos:	TON;			(* time since AllInPos has become TRUE *)
+	i:					INT;			(* index-runner for loops *)
+	xx:					FB_StepTracker;	(* auto record steps *)
+	StatString:			STRING(10);		(* '+MM=SS' *)
+
+END_VAR
+
+
+(* ___________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/01            '),
+	(* Error 02 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/02            '),
+	(* Error 03 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/03            '),
+	(* Error 04 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/04            '),
+	(* Error 05 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/05            '),
+	(* Error 06 *)		(Prio := ErrZyl, Nr:= 466, Txt:='       =320-BX1'),
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/10            '),
+	(* Error 11 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/Nest 1 Vision Check NOK 3 times in row'),
+	(* Error 12 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/Nest 2 Vision Check NOK 3 times in row'),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/Nest 3 Vision Check NOK 3 times in row'),
+	(* Error 14 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/Nest 4 Vision Check NOK 3 times in row'),
+	(* Error 15 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/15            '),
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/16            ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ;
+END_VAR
+VAR CONSTANT
+	feVisionCheckXtimes1		:INT := 11;
+	feVisionCheckXtimes2		:INT := 12;
+	feVisionCheckXtimes3		:INT := 13;
+	feVisionCheckXtimes4		:INT := 14;
+END_VAR
+
+(*
+MV,466,*************** §Kamera§ §Prüfung§ §NIO§
+MV,466,         §X-Mal in Folge§
+*)
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+
+	(* == vision sensor Sensopart V20C-CO-A2-W12 == *)
+	ixVisionSensorReady				:BOOL:= FALSE;	(* hardware ready *)
+	
+	
+	BDE_bVisionSensorOn				:BOOL := FALSE;	(* station runs with Vision sensor *)
+	byteVisionSensorJobNo			:BYTE;			(* Job 1 number for Vision sensor *)
+
+	bBDE							:BOOL; (* Dummy *)
+	IP_CodeReader_BX1				:T_IPv4Addr	:= '192.168.20.53';	(* vision sensor Sensorpart *)
+
+END_VAR
+
+
+(* _____________________ *)
+(* -- Function Blocks -- *)
+VAR
+(* check glue dosing *)
+	fb_VisionSensor					:FB_CamSensopartV10;
+	
+	awVisionSensorCheckXtimes1		:AWFehler;
+	awVisionSensorCheckXtimes2		:AWFehler;
+	awVisionSensorCheckXtimes3		:AWFehler;
+	awVisionSensorCheckXtimes4		:AWFehler;
+END_VAR
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+(* -- Initialisation -- *)
+IF neustart OR g_bOnlineChange THEN
+	StatString 		:= RIGHT(CONCAT( '000',INT_TO_STRING(StNr) ),3); (* three digits station's prefix is being created automatically for station *)
+END_IF
+
+(* _______________ *)
+(* -- Parameter -- *)
+StatEin 					:= ActOrd[MPart].ord_stat[E_TAB_MO_20_ST_53_1].sd_ein;
+BDE_bVisionSensorOn			:= ActOrd[MPart].ord_stat[OrderNr].sd_z1;
+
+IF bBDE THEN //Dummy
+	byteVisionSensorJobNo	:= DINT_TO_BYTE(LIMIT(1,ActOrd[MPart].ord_stat[OrderNr].sd_p1, 255));
+ELSE
+	byteVisionSensorJobNo	:= in_byteVisionSensorJobNo;
+END_IF 
+(* ____________ *)
+(* -- Inputs -- *)
+//ixVisionSensorReady			:= _I1025_4;
+
+
+(* _______________________ *)
+(* -- Timer / Watchdogs -- *)
+UZ( IN:= NOT SWI AND BedienEinheit.grundbed, PT:= T#5s );
+tonSeitSwi( IN := NOT SWI AND Bedieneinheit.grundbed, PT := t#30d );
+tonSeitAllInPos( IN := AllInPos AND Bedieneinheit.grundbed, PT := t#30d );
+
+
+(* _______________ *)
+(* -- Cylinders -- *)
+AllInPos :=	TRUE;
+
+
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID, FAnz:= DisplayNr, EF:= Errors1, F:= f1 );
+
+(* Error´s of function blocks *)
+Fault	:=	fb_VisionSensor.Fault;
+Warning := 	fb_VisionSensor.Waiting;
+Waiting := 	fb_VisionSensor.Warning;
+FOR i := 1 TO ErrMaxBits BY 1 DO
+	IF f1[i] THEN
+		IF 		Errors1[i].Prio <= ErrZyl 			THEN Fault := TRUE;
+		ELSIF	Errors1[i].Prio <= ErrEndl 			THEN Waiting := TRUE; f1[i] := FALSE;
+		ELSIF	Errors1[i].Prio <= ErrWechselpos	THEN Warning := TRUE; f1[i] := FALSE; END_IF
+	END_IF
+END_FOR
+
+
+// report Error, Waiting and Warning to cell
+IF Fault 	THEN io_RtFault 	:= SETBIT32( io_RtFault,   RtStNr ); END_IF
+IF Waiting 	THEN io_RtWaiting 	:= SETBIT32( io_RtWaiting, RtStNr ); END_IF
+IF Warning	THEN io_RtWarning 	:= SETBIT32( io_RtWarning, RtStNr ); END_IF
+
+(* Create Errrors / Misc. Errors *)
+
+(* __________________________________ *)
+(* -- Station - Allowed to Operate -- *)
+Betrieb := 	Bedieneinheit.betrieb
+		AND NOT Fault
+		AND NOT ManualRun
+		AND BedienEinheit.ventile_ok;
+
+
+(* ____________________ *)
+(* -- Start Station  -- *)
+
+(* ________________ *)
+(* -- Step-Chain -- *)
+xx( iStep := Schritt );
+
+(* reset flags *)
+out_bVisionSensorRuns := FALSE;
+fb_VisionSensor.in_bStartMessung := FALSE;
+
+SWI := FALSE;
+
+CASE Schritt OF
+(*---------- glue dosing check cavity 1 ----------- *)
+00:	xx.x := 'in basepos. - wait for start vision sensor';
+	IF in_bStartVisionSensor
+	THEN
+	(* -> start vision sensor check *) 
+		_QX_23_1:=TRUE;
+		out_bVisionSensorRuns 			 := TRUE;			(* start vision check *)
+		fb_VisionSensor.in_bStartMessung := TRUE;
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+
+10:	xx.x := 'start vision sensor';
+	out_bVisionSensorRuns			 := TRUE;
+	fb_VisionSensor.in_bStartMessung := TRUE;	(* start vision check *)
+
+	IF fb_VisionSensor.out_bFertig
+	OR NOT BDE_bVisionSensorOn 
+	THEN
+		(* - Detector 1 - *)
+		IF fb_VisionSensor.Fault
+		OR NOT BDE_bVisionSensorOn
+		OR (fb_VisionSensor.arrEmpfangDatenkanal[22] <> 1)
+		THEN
+			IF arrCarrierData[RtNr][RtStNr][1].PartDataPcb.teilestatus > srBad THEN
+			//BDE Counter
+			BDEIncCounter( FALSE, bcM20_St053_FoilCheckNOK_1, 1, ActOrd[MPart].ord_id, MPart);
+			BDEIncCounter( TRUE	, bcM20_St053_FoilCheckNOK_1, 1, ActOrd[MPart].ord_id, MPart);	
+			
+			//AW X - times
+			awVisionSensorCheckXtimes1.ischl := TRUE;
+			
+			//Write fbDataInfo
+			arrCarrierData[RtNr][RtStNr][1].PartDataPcb.iFehlercode 					:= bcM20_St053_FoilCheckNOK_1;
+			arrCarrierData[RtNr][RtStNr][1].PartDataPcb.teilestatus 					:= srBad;
+			arrCarrierData[RtNr][RtStNr][1].PartDataPcb.StNrSchlechtGesetzt 			:= StNr;	
+			END_IF
+		ELSE
+			arrCarrierData[RtNr][RtStNr][1].PartDataPcb.Mo20_St053.bFoilCheckOK	:= TRUE;
+			awVisionSensorCheckXtimes1.igut	 := TRUE;
+		END_IF
+		
+		(* - Detector 2 - *)
+		IF fb_VisionSensor.Fault
+		OR NOT BDE_bVisionSensorOn
+		OR (fb_VisionSensor.arrEmpfangDatenkanal[23] <> 1)
+		THEN
+			IF arrCarrierData[RtNr][RtStNr][2].PartDataPcb.teilestatus > srBad THEN
+			//BDE Counter
+			BDEIncCounter( FALSE, bcM20_St053_FoilCheckNOK_2, 1, ActOrd[MPart].ord_id, MPart);
+			BDEIncCounter( TRUE	, bcM20_St053_FoilCheckNOK_2, 1, ActOrd[MPart].ord_id, MPart);	
+			
+			//AW X - times
+			awVisionSensorCheckXtimes2.ischl := TRUE;
+			
+			//Write fbDataInfo
+			arrCarrierData[RtNr][RtStNr][2].PartDataPcb.iFehlercode 					:= bcM20_St053_FoilCheckNOK_2;
+			arrCarrierData[RtNr][RtStNr][2].PartDataPcb.teilestatus 					:= srBad;
+			arrCarrierData[RtNr][RtStNr][2].PartDataPcb.StNrSchlechtGesetzt 			:= StNr;	
+			END_IF
+		ELSE
+			arrCarrierData[RtNr][RtStNr][2].PartDataPcb.Mo20_St053.bFoilCheckOK	:= TRUE;
+			awVisionSensorCheckXtimes2.igut	 := TRUE;
+		END_IF  
+
+		(* - Detector 3 - *)
+		IF fb_VisionSensor.Fault
+		OR NOT BDE_bVisionSensorOn
+		OR (fb_VisionSensor.arrEmpfangDatenkanal[24] <> 1)
+		THEN
+			IF arrCarrierData[RtNr][RtStNr][3].PartDataPcb.teilestatus > srBad THEN
+			//BDE Counter
+			BDEIncCounter( FALSE, bcM20_St053_FoilCheckNOK_3, 1, ActOrd[MPart].ord_id, MPart);
+			BDEIncCounter( TRUE	, bcM20_St053_FoilCheckNOK_3, 1, ActOrd[MPart].ord_id, MPart);	
+			
+			//AW X - times
+			awVisionSensorCheckXtimes3.ischl := TRUE;
+			
+			//Write fbDataInfo
+			arrCarrierData[RtNr][RtStNr][3].PartDataPcb.iFehlercode 					:= bcM20_St053_FoilCheckNOK_3;
+			arrCarrierData[RtNr][RtStNr][3].PartDataPcb.teilestatus 					:= srBad;
+			arrCarrierData[RtNr][RtStNr][3].PartDataPcb.StNrSchlechtGesetzt 			:= StNr;	
+			END_IF
+			
+		ELSE
+			arrCarrierData[RtNr][RtStNr][3].PartDataPcb.Mo20_St053.bFoilCheckOK	:= TRUE;
+			awVisionSensorCheckXtimes3.igut	 := TRUE;
+		END_IF  
+		
+		(* - Detector 4 - *)
+		IF fb_VisionSensor.Fault
+		OR NOT BDE_bVisionSensorOn
+		OR (fb_VisionSensor.arrEmpfangDatenkanal[25] <> 1)
+		THEN
+			IF arrCarrierData[RtNr][RtStNr][4].PartDataPcb.teilestatus > srBad THEN
+			//BDE Counter
+			BDEIncCounter( FALSE, bcM20_St053_FoilCheckNOK_4, 1, ActOrd[MPart].ord_id, MPart);
+			BDEIncCounter( TRUE	, bcM20_St053_FoilCheckNOK_4, 1, ActOrd[MPart].ord_id, MPart);	
+			
+			//AW X - times
+			awVisionSensorCheckXtimes4.ischl := TRUE;
+			
+			//Write fbDataInfo
+			arrCarrierData[RtNr][RtStNr][4].PartDataPcb.iFehlercode 					:= bcM20_St053_FoilCheckNOK_4;
+			arrCarrierData[RtNr][RtStNr][4].PartDataPcb.teilestatus 					:= srBad;
+			arrCarrierData[RtNr][RtStNr][4].PartDataPcb.StNrSchlechtGesetzt 			:= StNr;	
+			END_IF
+			
+		ELSE
+			arrCarrierData[RtNr][RtStNr][4].PartDataPcb.Mo20_St053.bFoilCheckOK	:= TRUE;
+			awVisionSensorCheckXtimes4.igut	 := TRUE;
+		END_IF  
+		
+		awVisionSensorCheckXtimes1( cntmax 	 := Fehlstop[OrderNr] );
+		awVisionSensorCheckXtimes1.igut 	     := FALSE;
+		awVisionSensorCheckXtimes1.ischl 	 := FALSE;
+		f1[feVisionCheckXtimes1] 			 := awVisionSensorCheckXtimes1.fehler;
+		
+		awVisionSensorCheckXtimes2( cntmax 	 := Fehlstop[OrderNr] );
+		awVisionSensorCheckXtimes2.igut 	     := FALSE;
+		awVisionSensorCheckXtimes2.ischl 	 := FALSE;
+		f1[feVisionCheckXtimes2] 			 := awVisionSensorCheckXtimes2.fehler;
+		
+		awVisionSensorCheckXtimes3( cntmax 	 := Fehlstop[OrderNr] );
+		awVisionSensorCheckXtimes3.igut 	     := FALSE;
+		awVisionSensorCheckXtimes3.ischl 	 := FALSE;
+		f1[feVisionCheckXtimes3] 			 := awVisionSensorCheckXtimes3.fehler;
+		
+		awVisionSensorCheckXtimes4( cntmax 	 := Fehlstop[OrderNr] );
+		awVisionSensorCheckXtimes4.igut 	     := FALSE;
+		awVisionSensorCheckXtimes4.ischl 	 := FALSE;
+		f1[feVisionCheckXtimes4] 			 := awVisionSensorCheckXtimes4.fehler;
+
+		//Write fbDataInfo (*DWOCOM Only dor one nest*)
+		arrCarrierData[RtNr][RtStNr][1].PartDataPcb.Mo20_St053.byteVisionSensorJob := fb_VisionSensor.in_byteJobNr;
+		arrCarrierData[RtNr][RtStNr][2].PartDataPcb.Mo20_St053.byteVisionSensorJob := fb_VisionSensor.in_byteJobNr;
+		arrCarrierData[RtNr][RtStNr][3].PartDataPcb.Mo20_St053.byteVisionSensorJob := fb_VisionSensor.in_byteJobNr;
+		arrCarrierData[RtNr][RtStNr][4].PartDataPcb.Mo20_St053.byteVisionSensorJob := fb_VisionSensor.in_byteJobNr;
+		
+ 		out_bVisionSensorRuns := TRUE;
+		
+		(* -> check, if it is a goodpart or a badpart *)
+		Schritt := Schritt + 10;
+		SWI := TRUE;
+	END_IF	
+
+20:	xx.x := 'check, if it is a goodpart or a badpart';
+	out_bVisionSensorRuns := TRUE;
+	IF NOT in_bStartVisionSensor 
+	THEN
+		(* step sequence ready *)
+		out_bVisionSensorRuns := FALSE;
+		_QX_23_1:=FALSE;
+		Schritt := 0;
+		SWI := TRUE;	
+	END_IF
+END_CASE
+
+
+(* ____________________ *)
+(* -- React to Steps -- *)
+IF NOT ManualRun THEN
+	;	
+END_IF
+
+(* ------ Vision sensor Sensopart V20C-OB-A2-R12 for check film ------- *)
+fb_VisionSensor(
+	MoNr						:= MoNr, 
+	BedienEinheit				:= BedienEinheit, 
+	FaultID						:= FaultID_VisionSensor_M20_St53, 
+	DisplayNr					:= DisplayNr, 
+	MPart						:= MPart, 
+	StatString					:= StatString, 
+	in_sNameDevice_10digits		:= '  =053-BX1', 
+	in_byteJobNr				:= 1,//byteVisionSensorJobNo,
+	in_sRemoteHost				:= IP_CodeReader_BX1, 
+	in_bBetriebsartFreilaufend	:= FALSE, 
+);
+
+(* _____________________________________ *)
+(* -- Stop Roundtable Condition-Based -- *)
+(* <----insert condition for stop here - i.e. zylVertical.y OR NOT zylVertical.a *)
+
+//stroke Vertical not in base position
+IF Fault
+THEN 
+	F_ResetFrgRtWithText(TRUE, RtNr, RtStNr, '§fault§ §vision sensor§ =320-BX1', io_RtFreigabe);
+END_IF
+
+(* _________________ *)
+(* -- Set outputs -- *)
+]]></ST>
+    </Implementation>
+    <LineIds Name="Mo20_St53_vision_sensor">
+      <LineId Id="4847" Count="103" />
+      <LineId Id="5111" Count="0" />
+      <LineId Id="4951" Count="20" />
+      <LineId Id="5112" Count="0" />
+      <LineId Id="4972" Count="22" />
+      <LineId Id="5113" Count="0" />
+      <LineId Id="4995" Count="10" />
+      <LineId Id="5114" Count="0" />
+      <LineId Id="5006" Count="10" />
+      <LineId Id="5115" Count="0" />
+      <LineId Id="5017" Count="10" />
+      <LineId Id="5116" Count="0" />
+      <LineId Id="5028" Count="82" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>
