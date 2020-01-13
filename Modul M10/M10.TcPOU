@@ -1,0 +1,115 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="M10" Id="{415803bf-0ed0-4ee2-b3cd-f1c10f22dc92}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK M10
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<CHANGES>
+Bei jeder Änderung bitte Datum, Versionierung, Namenskürzel und Änderungsbeschreibung eintragen!
+
+Datum 		|	Version	|	Autor	|	Beschreibung		
+--------------------------------------------------------------------------------
+2017-07-04	|	1.00	|	SBA		|	Initial Version
+</CHANGES>
+
+*)
+
+(* _______________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	MoNr:				INT := 1;
+	M_Zentrale: 		INT := 1;
+	TxtAnzHilfs: 		INT := C_TXT_ANZ_1; 	(* Nr. of Textdisplay *)
+	TxtAnzHaupt:		INT := C_TXT_ANZ_M20;	(* Nr. of Textdisplay *)
+	MPart:				INT := 1;
+	CPart:				INT := 1;	(* Counter-Part *)
+	KEBA_PANEL_NR:		INT := 2;
+END_VAR
+
+(* ____________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrEndl,Nr:=1651, Txt:='           -TB1'),
+	(* Error 02 *)		(Prio := ErrStau,Nr:=1652, Txt:='           -TB1'),
+	(* Error 03 *)		(Prio := ErrEndl,Nr:=1653, Txt:='           -VQ1'),
+	(* Error 04 *)		(Prio := ErrZyl, Nr:=1654, Txt:='           -VQ1'),
+	(* Error 05 *)		(Prio := ErrFw,  Nr:=1655, Txt:='           -VQ1'),
+	(* Error 06 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/06            '),
+	(* Error 07 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/10            '),
+	(* Error 11 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/11            '),
+	(* Error 12 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/12            '),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13            '),
+	(* Error 14 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/14            '),
+	(* Error 15 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/15            '),
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/16            ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ4;
+END_VAR
+VAR CONSTANT
+END_VAR
+
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* _________________________________________ *)
+(* Initialisation of Step Sequence Diagnosis *)
+InitModul('              ');
+]]></ST>
+    </Implementation>
+    <Action Name="TurnOffLamps" Id="{6176506d-48be-47e8-898c-79b11e6df292}">
+      <Implementation>
+        <ST><![CDATA[_SPV_M20_P1_QA1          		:= FALSE; 	(* lighting equipment on *)
+	
+_GM1_M20_MP1_AF1_PF1     		:= FALSE; 	(* signal lamp green *)
+_GM1_M20_MP1_AF1_PF2     		:= FALSE; 	(* signal lamp orange *)
+_GM1_M20_MP1_AF1_PF3     		:= FALSE; 	(* signal lamp red *)
+_GM1_M20_MP1_AF1_4          := FALSE; 	(* signal lamp spare *)
+_GM1_M20_MP1_AF1_5          := FALSE; 	(* signal lamp spare *)
+
+_GM1_M20_BF1_SF2_X1         := FALSE; 	(* operating field 1 button lamp (I) *)
+_GM1_M20_BF1_SF3_X1         := FALSE; 	(* operating field 1 button lamp (R) *)
+_GM1_M20_BF3_SF2_X1         := FALSE; 	(* operating field 3 button lamp (I) *)
+_GM1_M20_BF3_SF3_X1         := FALSE; 	(* operating field 3 button lamp (R) *)
+]]></ST>
+      </Implementation>
+    </Action>
+    <Action Name="TurnOnLamps" Id="{bfc14359-0112-4a39-9db4-189cdf9bd499}">
+      <Implementation>
+        <ST><![CDATA[_SPV_M20_P1_QA1  		        := TRUE; 	(* lighting equipment on *)
+	
+_GM1_M20_MP1_AF1_PF1   	  		:= TRUE; 	(* signal lamp green *)
+_GM1_M20_MP1_AF1_PF2   	  		:= TRUE; 	(* signal lamp orange *)
+_GM1_M20_MP1_AF1_PF3	    	:= TRUE; 	(* signal lamp red *)
+_GM1_M20_MP1_AF1_4			    := TRUE; 	(* signal lamp spare *)
+_GM1_M20_MP1_AF1_5	        	:= TRUE; 	(* signal lamp spare *)
+
+_GM1_M20_BF1_SF2_X1         := TRUE; 	(* operating field 1 button lamp (I) *)
+_GM1_M20_BF1_SF3_X1         := TRUE; 	(* operating field 1 button lamp (R) *)
+_GM1_M20_BF3_SF2_X1         := TRUE; 	(* operating field 3 button lamp (I) *)
+_GM1_M20_BF3_SF3_X1         := TRUE; 	(* operating field 3 button lamp (R) *)
+]]></ST>
+      </Implementation>
+    </Action>
+    <LineIds Name="M10">
+      <LineId Id="17054" Count="2" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+    <LineIds Name="M10.TurnOffLamps">
+      <LineId Id="2" Count="9" />
+      <LineId Id="18" Count="0" />
+      <LineId Id="13" Count="0" />
+      <LineId Id="1" Count="0" />
+    </LineIds>
+    <LineIds Name="M10.TurnOnLamps">
+      <LineId Id="16" Count="1" />
+      <LineId Id="2" Count="9" />
+      <LineId Id="1" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>
