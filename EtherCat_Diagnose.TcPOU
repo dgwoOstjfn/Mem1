@@ -1,0 +1,288 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.3">
+  <POU Name="EtherCat_Diagnose" Id="{08ae8e45-bd27-4e19-b431-94f6ec944c99}" SpecialFunc="None">
+    <Declaration><![CDATA[PROGRAM EtherCat_Diagnose
+
+(* -- Standard-Eingangsvariablen -- *)
+VAR_INPUT
+	FaultID: 							BYTE := 244;		(* ID für Fehlerfeld *)
+	DisplayNr: 							INT := 1;		(* Nummer der Textanzeige *)
+END_VAR
+
+VAR_OUTPUT
+	ui_Slave_Soll: 						UINT;					//Anzahl der projektierten Slaves
+	ui_Slave_ist: 						UINT;					//Anzahl der erkannten Slaves
+END_VAR
+
+
+VAR_INPUT PERSISTENT
+	EtherCatAmsNetId			AT %I*	:AmsNetId;
+END_VAR
+
+
+VAR
+	
+//	Anzeige
+	sBMK:								STRING(15);				//BMK der gestörten Baugruppe
+	sOpMode:							STRING;					//Betriebsart
+	sError:								STRING;					//Fehler
+	sLinkState:							STRING;					//Link
+	sPort:								STRING;					//Port
+	mError:								STRING;					//Fehler
+	mOpMode:							STRING;					//Betriebsart
+// Schleifen
+	i: 									UINT;					//Schleifenzähler
+	
+// Funktionsbausteine
+	fb_GetCurTaskIndex:					GETCURTASKINDEX;		//Aktuellen Taskindex ermitteln
+	fbGetConfig: 						FB_EcGetConfSlaves;		//Aktuelle Konfiguration auslesen
+	fbGetState: 						FB_EcGetSlaveState;		//Status der Slaves auslesen
+	fbMasterState:						FB_EcGetMasterDevState; //Status des Masters auslesen
+	varString:							ARRAY[1..9] OF STRING;
+	arSlave: 							ARRAY [0..EC_MAX_SLAVES] OF ST_EcSlaveConfigData;
+	arStatus: 							ARRAY [0..EC_MAX_SLAVES] OF ST_EcSlaveState;
+
+// Flanken
+	fbFtrig_Done:						F_TRIG;
+	
+// Hilfsvariablen
+	b_Neustart: 						BOOL;
+	
+	OpMode: 							INT;
+	SlaveError: 						INT;
+	LinkState: 							INT;
+	LinkPort: 							INT;
+	OpModeDEMO: 						INT;
+	SlaveErrorDEMO: 					INT;
+	LinkStateDEMO: 						INT;
+	LinkPortDEMO: 						INT;
+	MasterDeviceState:					WORD;	
+	
+	bMasterLinkErr:						BOOL;
+	bMasterIoLockedAfterLinkErr: 		BOOL;
+	bMasterLinkErrRedundancyAdapter:	BOOL;		
+	bMasterMissingOneFrame:				BOOL;
+	bMasterOutOfSendResources:			BOOL;
+	bMasterWatchdog:					BOOL;
+	bMasterEthernetDriverMissing:		BOOL;
+	bMasterIoResetActive:				BOOL;
+	bMasterOneIsInit:					BOOL;
+	bMasterOneIsPreOp:					BOOL;
+	bMasterOneIsSafeOp:					BOOL;
+	bMasterOneIsInError:				BOOL;
+	bMasterDcNotInSync:					BOOL;
+	bMasterFault:						BOOL;
+END_VAR	
+
+VAR
+(* -- Fehlerarray 1 -- *)
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Fehler 01 *)		(Prio := ErrZentr,  Nr:= 555, Txt:='               '),
+	(* Fehler 02 *)		(Prio := ErrZentr,  Nr:= 556, Txt:='Ethercat PLC1  '), 
+	(* Fehler 03 *)		(Prio := ErrZentr,  Nr:= 557, Txt:='Ethercat PLC1  '),
+	(* Fehler 04 *)		(Prio := ErrZentr,  Nr:= 558, Txt:='Ethercat PLC1  '),
+	(* Fehler 05 *)		(Prio := ErrZentr,  Nr:= 559, Txt:='Ethercat PLC1  '),
+	(* Fehler 06 *)		(Prio := ErrZentr,  Nr:= 560, Txt:='Ethercat PLC1  '),
+	(* Fehler 07 *)		(Prio := ErrZentr,  Nr:= 561, Txt:='Ethercat PLC1  '),
+	(* Fehler 08 *)		(Prio := ErrZyl,    Nr:= 562, Txt:='Ethercat PLC1  '),
+	(* Fehler 09 *)		(Prio := ErrZentr,  Nr:= 563, Txt:='Ethercat PLC1  '),
+	(* Fehler 10 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/10            '),
+	(* Fehler 11 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/11            '),
+	(* Fehler 12 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/12            '),
+	(* Fehler 13 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/13			   '),
+	(* Fehler 14 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/14    		   '),
+	(* Fehler 15 *)		(Prio := ErrFW,     Nr:= 510, Txt:='/15    		   '),
+	(* Fehler 16 *)		(Prio := ErrZentr,  Nr:= 510, Txt:='/16    		   ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: 			ERRORANZ;
+END_VAR
+
+VAR CONSTANT
+//ERROR 1
+	
+	SlaveErr			:INT:=01;
+	ErrMasterLink		:INT:=02;//0x0001 = Link error
+	ErrMasterIoLock		:INT:=03;//0x0002 = I/O locked after link error (I/O reset required)
+	ErrMasterLinkRed	:INT:=04;//0x0004 = Link error (redundancy adapter)
+	ErrMasterFrame		:INT:=05;//0x0008 = Missing one frame (redundancy mode)
+	ErrMasterRes		:INT:=06;//0x0010 = Out of send resources (I/O reset required)
+	ErrMasterWDT		:INT:=07;//0x0020 = Watchdog triggered
+	ErrMasterDriver		:INT:=08;//0x0040 = Ethernet driver (miniport) not found
+	ErrMasterIoReset	:INT:=09;//0x0080 = I/O reset active
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+
+// Beim Neustart oder Online Channge aktuelle !OFFLINE! Konfiguration auslesen
+ 
+fbGetConfig(
+	sNetId					:= F_CreateAmsNetId(nIds:=EtherCatAmsNetId ),
+	pArrEcConfSlaveInfo		:=ADR(arSlave) , 
+	cbBufLen				:= , 
+	bExecute				:=(neustart OR g_bOnlineChange OR ui_Slave_Soll=0) AND NOT fbGetConfig.bError AND NOT fbGetConfig.bBusy, 
+	tTimeout				:= , 
+	bBusy					=> , 
+	bError					=> , 
+	nErrorId				=> , 
+	nSlaves					=>ui_Slave_Soll );
+
+
+// LinkState und Status aller Slaves auslesen 	
+fbGetState(
+	sNetId					:= F_CreateAmsNetId(nIds:=EtherCatAmsNetId ) , 
+	nSlaveAddr				:=arSlave[i].nAddr , 
+	bExecute				:=NOT fbGetState.bBusy AND ui_Slave_Soll>0 AND (MasterDeviceState AND 16#00FF)=0, 
+	tTimeout				:= , 
+	bBusy					=> , 
+	bError					=> , 
+	nErrId					=> , 
+	state					=>arStatus[i] );
+
+//	Bei Fallender Flanke von "busy ist der Slave ausgelesen. Nächsten Status ermitteln
+	fbFtrig_Done(			CLK:=fbGetState.bBusy);
+	
+	
+fbMasterState(
+	sNetId:=F_CreateAmsNetId(nIds:=EtherCatAmsNetId ), 
+	bExecute:=NOT fbMasterState.bBusy , 
+	tTimeout:= , 
+	bBusy=> , 
+	bError=> , 
+	nErrId=> , 
+	nDevState=>MasterDeviceState );	
+	
+//Masterzustand auswerten
+//ACHTUNG! Das höherwertige Byte ist nur im Redundanzbertieb zuverlässig!
+
+bMasterLinkErr					:= MasterDeviceState.0;
+bMasterIoLockedAfterLinkErr		:= MasterDeviceState.1;
+bMasterLinkErrRedundancyAdapter := MasterDeviceState.2;
+bMasterMissingOneFrame			:= MasterDeviceState.3;
+bMasterOutOfSendResources		:= MasterDeviceState.4;
+bMasterWatchdog					:= MasterDeviceState.5;
+bMasterEthernetDriverMissing	:= MasterDeviceState.6;
+bMasterIoResetActive			:= MasterDeviceState.7;
+
+//Fehler an BDE übergeben
+f1[ErrMasterLink]	:=bMasterLinkErr;
+f1[ErrMasterIoLock]	:=bMasterIoLockedAfterLinkErr;	
+f1[ErrMasterLinkRed]:=bMasterLinkErrRedundancyAdapter;
+f1[ErrMasterFrame]	:=bMasterMissingOneFrame;
+f1[ErrMasterRes]	:=bMasterOutOfSendResources;
+f1[ErrMasterWDT]	:=bMasterWatchdog;
+f1[ErrMasterDriver]	:=bMasterEthernetDriverMissing;
+f1[ErrMasterIoReset]:=bMasterIoResetActive;
+
+
+IF(MasterDeviceState AND 16#00FF)<>0 THEN f1[SlaveErr]:=FALSE; END_IF //Slavefehler ausblenden wenn Master einen Fehler meldet
+										
+IF(fbFtrig_Done.Q AND (MasterDeviceState AND 16#00FF)=0) THEN
+
+//Dynamische Texte initialisieren
+	sOpMode					:='';
+	sError					:='';
+	sLinkState				:='';
+	sPort					:='';
+	Errors1[SlaveErr].txt	:='';
+//Daten zerlegen
+
+	OpMode					:=SHR((arStatus[i].deviceState   AND 2#00001111),0);//Zustand State Machine maskieren und schieben
+	SlaveError				:=SHR((arStatus[i].deviceState 	 AND 2#11110000),4);//Fehlerursache Slave maskieren und schieben
+	LinkState				:=SHR((arStatus[i].LinkState 	 AND 2#00001111),0);//Link Status maskieren und schieben
+	LinkPort				:=SHR((arStatus[i].LinkState 	 AND 2#11110000),4);//Fehlerhafter Port maskieren und schieben
+		
+//Fehlerursache Slave
+	CASE SlaveError OF	
+		16#0001:sError		:='§meldet allgemeinen Fehler§ ';	
+		16#0002:sError		:='§Falsche Hardware erkannt§ ';
+		16#0004:sError		:='§Fehler während der Initialisierung§ ';
+		16#0005:sError		:='§Konfigurationsfehler COE Objekt ungültig§';
+		16#0006:sError		:='§Falsche Hardware§ ';
+		16#0008:sError		:='§Slave ist dekativiert§ ';
+		
+		ELSE	sError		:='';
+	END_CASE
+	
+//Zustand State Machine
+	CASE OpMode OF	
+		16#0001:sOpMode		:='§INIT§';
+		16#0002:sOpMode		:='§PREOP§';
+		16#0003:sOpMode		:='§BOOT§';
+		16#0004:sOpMode		:='§SAFEOP§';
+		16#0008:sOpMode		:='§OP§';	
+		ELSE	sOpMode		:='';	
+	END_CASE
+	
+//Link Status
+	CASE LinkState OF		
+		16#0001:sLinkState	:='§keine Verbindung zum Bussystem§ ';
+		16#0002:sLinkState	:='§Verbindungsfehler§ ';
+		16#0004:sLinkState	:='§EBUS Verbindung § ';
+		16#0008:sLinkState	:='§unerwartete Verbindung§ ';
+		ELSE 	sLinkState	:='';	
+	END_CASE
+	
+// Linking Port
+	CASE LinkPort OF
+		16#0001:sPort		:='- §PORT A§ ';
+		16#0002:sPort		:='- §PORT B§ ';
+		16#0004:sPort		:='- §PORT C§ ';
+		16#0008:sPort		:='- §PORT D§ ';
+		ELSE	sPort		:='';			
+	END_CASE
+END_IF
+
+//Fehleranzeige; Token generieren	
+	IF(fbFtrig_Done.Q) AND ui_Slave_Soll>1 THEN
+			
+		IF((arStatus[i].linkState<>0) OR (arStatus[i].deviceState<>8)) THEN //Auswertung nur Starten wenn der Slave gestört ist
+			sBMK:=arSlave[i].sName;											//BMK holen
+			sBMK:=REPLACE(arSlave[i].sName,'', 1, 1 );						//"=" entfernen (wegen länge)
+			sBMK:=F_LTrim(sBMK);											//Leerzeichen Links entfernen	
+			sBMK:=F_RTRIM(sBMK);											//Leerzeichen Rechts entfernen
+		
+			IF(arSlave[i].sType<>'')THEN	varString[1]:=CONCAT3(' (',arSlave[i].sType,') ');	ELSE varString[1]:=''; END_IF
+			IF(sOpMode<>'') 		THEN 	varString[2]:=CONCAT3('- ',sOpMode,': '); 			ELSE varString[2]:=''; END_IF
+			IF(sLinkState<>'') 		THEN 	varString[3]:=sLinkState; 							ELSE varString[3]:=''; END_IF
+			IF(sError<>'') 			THEN 	varString[4]:=sError; 								ELSE varString[4]:=''; END_IF
+			IF(sPort<>'') 			THEN 	varString[5]:=sPort; 								ELSE varString[5]:=''; END_IF
+	
+			IF(sLinkState='') AND (sError='') AND (sPort='') THEN //Manuelle Anwahl der Betriebsart -> Gesondert anzeichen
+				varString[6]:='§Betriebsart§ §unzureichend§ (OP §gefordert§)';	
+			ELSE
+				varString[6]:='';	
+			END_IF
+
+			// Token generieren			
+			EtherCat_FaultString	:= '';
+			EtherCat_FaultString	:= CONCAT( EtherCat_FaultString, varString[1] );
+			EtherCat_FaultString	:= CONCAT( EtherCat_FaultString, varString[2] );
+			EtherCat_FaultString	:= CONCAT( EtherCat_FaultString, varString[3] );
+			EtherCat_FaultString	:= CONCAT( EtherCat_FaultString, varString[4] );
+			EtherCat_FaultString	:= CONCAT( EtherCat_FaultString, varString[5] );
+			EtherCat_FaultString	:= CONCAT( EtherCat_FaultString, varString[6] );
+		
+			
+			Errors1[SlaveErr].txt	:=sBMK;	
+			f1[SlaveErr]			:=TRUE;
+		ELSE
+			f1[SlaveErr]			:=FALSE;
+			
+				i:=i+1;				
+				sBMK:='';
+		END_IF
+	END_IF
+
+	IF(i>fbGetConfig.nSlaves-1) THEN i:=0;	 f1[SlaveErr]:=FALSE; EtherCat_FaultString:='';	END_IF	//Ende der Slavezahl erreicht
+	IF(fbGetConfig.nSlaves<=0) 	THEN i:=0;													END_IF	//Wenn es keine Slaves gibt wieder bei 0 anfangen
+		
+	//Fehleraufruf
+	Fehler1(ID := FaultId, FAnz := DisplayNr,Anzahl := 16,EF:= Errors1, F:= f1);]]></ST>
+    </Implementation>
+    <LineIds Name="EtherCat_Diagnose">
+      <LineId Id="114" Count="165" />
+      <LineId Id="5" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

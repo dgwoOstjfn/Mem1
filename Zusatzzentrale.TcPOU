@@ -1,0 +1,226 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="Zusatzzentrale" Id="{c2229932-f939-498c-aed7-29c3127f95bf}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK Zusatzzentrale
+(*--------------------------------------------------------------------------------------
+IMA AUTOMATION AMBERG GMBH        
+
+Bei jeder Änderung bitte Datum, Versionierung, Namenskürzel und Änderungsbeschreibung eintragen!
+
+Datum 		|	Version	|	Autor	|	Beschreibung		
+--------------------------------------------------------------------------------
+2016-01-14	|	1.00	|	SBA		|	First Version	
+			|			|			|
+
+
+  
+----------------------------------------------------------------------------------------*)
+
+(* _____________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	FaultID: 		BYTE := 0;		(* ID for Error-Array *)
+	BedienEinheit:	ZENTR_DATA;		(* Zentrale *)
+	DisplayNrHilfs:	INT := 1;		(* Nr. Helping Textdisplay *)
+	DisplayNrHaupt:	INT := 2;		(* Nr. Main Textdisplay *)
+END_VAR
+
+
+(* _______________________ *)
+(* -- Output -- *)
+VAR_OUTPUT
+	fehlerausgabe_stop: BOOL; (* errors that lead to machinestop *)
+END_VAR
+
+
+(* _____________________________________________ *)
+(* -- Errorarray for  Hilfs-Fehlertextanzeige -- *)
+VAR
+	ErrorsHilfs: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Fehler 01 *)		(Prio := ErrAuto, 		Nr:= 512, Txt:='DK-42237043    '),
+	(* Fehler 02 *)		(Prio := ErrZyl, 		Nr:= 513, Txt:='            M10'),
+	(* Fehler 03 *)		(Prio := ErrZyl, 		Nr:= 513, Txt:='            M20'),
+	(* Fehler 04 *)		(Prio := ErrZyl, 		Nr:= 513, Txt:='            M30'),
+	(* Fehler 05 *)		(Prio := ErrZyl, 		Nr:= 516, Txt:='n.e.           '),
+	(* Fehler 06 *)		(Prio := ErrZyl, 		Nr:= 517, Txt:='n.e.           '),
+	(* Fehler 07 *)		(Prio := ErrZyl, 		Nr:= 510, Txt:='/07            '),
+	(* Fehler 08 *)		(Prio := ErrZyl, 		Nr:= 510, Txt:='/08            '),
+	(* Fehler 09 *)		(Prio := ErrZyl,		Nr:= 510, Txt:='/09            '),
+	(* Fehler 10 *)		(Prio := ErrZyl, 		Nr:= 510, Txt:='/10            '),
+	(* Fehler 11 *)		(Prio := ErrZyl, 		Nr:= 510, Txt:='/11            '),
+	(* Fehler 12 *)		(Prio := ErrZyl,		Nr:= 510, Txt:='/12            '),
+	(* Fehler 13 *)		(Prio := ErrZyl,		Nr:= 510, Txt:='/13            '),
+	(* Fehler 14 *)		(Prio := ErrZyl,		Nr:= 510, Txt:='/14            '),
+	(* Fehler 15 *)		(Prio := ErrZyl,		Nr:= 510, Txt:='/15            '),
+	(* Fehler 16 *)		(Prio := ErrZyl, 		Nr:= 510, Txt:='/16            ')
+	];
+	fHilfs: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	FehlerHilfs: ERRORANZ;
+END_VAR
+VAR CONSTANT
+	feInfo						:INT:=01;
+	feBedienungPanel_1			:INT:=02;
+	feBedienungPanel_2			:INT:=03;
+	feBedienungPanel_3			:INT:=04;
+END_VAR
+(*
+MV,512,PIA Automation Amberg GmbH
+MV,512,~TOKEN_HELP~
+
+MV,513,*************** §Schlüsselschalter§ §Mobile Bedieneinheit§ §betätigt§
+MV,513,- §alle anderen§ §Bedienstellen§ §der§ §Zelle§ §gesperrt§
+*)
+
+
+
+(* ____________________________________________ *)
+(* -- Fehlerarray für Hauptfehlertextanzeige -- *)
+VAR
+	ErrorsHaupt: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Fehler 01 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/01            '),
+	(* Fehler 02 *)		(Prio := ErrZentr,		Nr:= 510, Txt:='/02            '),
+	(* Fehler 03 *)		(Prio := ErrZentr,		Nr:= 510, Txt:='/03            '),
+	(* Fehler 04 *)		(Prio := ErrZentr,		Nr:= 510, Txt:='/04            '),
+	(* Fehler 05 *)		(Prio := ErrZentr,		Nr:= 510, Txt:='/05            '),
+	(* Fehler 06 *)		(Prio := ErrZentr,	 	Nr:= 510, Txt:='/06            '),
+	(* Fehler 07 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/07            '),
+	(* Fehler 08 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/08            '),
+	(* Fehler 09 *)		(Prio := ErrZentr,		Nr:= 510, Txt:='/09            '),
+	(* Fehler 10 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/10            '),
+	(* Fehler 11 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/11            '),
+	(* Fehler 12 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/12            '),
+	(* Fehler 13 *)		(Prio := ErrZentr,	 	Nr:= 510, Txt:='/13            '),
+	(* Fehler 14 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/14            '),
+	(* Fehler 15 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/15            '),
+	(* Fehler 16 *)		(Prio := ErrZentr, 		Nr:= 510, Txt:='/16            ')
+	];
+	fHaupt: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	FehlerHaupt: ERRORANZ2;
+END_VAR
+VAR CONSTANT
+END_VAR
+
+
+(* ______________________ *)
+(* -- Lokale Variablen -- *)
+VAR PERSISTENT
+	sHilfsText				:STRING(255) := '';
+	taktInfo				:TOF;
+	blinkerAnzeige			:FB_Blinker;
+END_VAR
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[IF t_erkenn.Q THEN
+	;
+END_IF
+
+
+
+(* ___________________________________ *)
+(* Error Messages for Help Textdisplay *)
+fHilfs[feInfo] := TRUE;
+TOKEN_HELP := sHilfsText;
+blinkerAnzeige( in_tPuls := t#10s, in_tPause := t#3s );
+taktInfo( IN := NOT taktInfo.Q, PT := T#500MS );
+
+
+
+fHilfs[feBedienungPanel_1] := _M20_KBR1;
+fHilfs[feBedienungPanel_2] := _M30_KBR1;
+fHilfs[feBedienungPanel_3] := _M40_KBR1;
+
+
+
+IF fHilfs[feBedienungPanel_1] THEN
+	IF bl_takt THEN		ErrorsHilfs[feBedienungPanel_1].Prio := ErrMeld;
+	ELSE				ErrorsHilfs[feBedienungPanel_1].Prio := ErrEndl;	END_IF
+END_IF
+IF fHilfs[feBedienungPanel_2] THEN
+	IF bl_takt THEN		ErrorsHilfs[feBedienungPanel_2].Prio := ErrMeld;
+	ELSE				ErrorsHilfs[feBedienungPanel_2].Prio := ErrEndl;	END_IF
+END_IF
+IF fHilfs[feBedienungPanel_3] THEN
+	IF bl_takt THEN		ErrorsHilfs[feBedienungPanel_3].Prio := ErrMeld;
+	ELSE				ErrorsHilfs[feBedienungPanel_3].Prio := ErrEndl;	END_IF
+END_IF
+
+
+
+(* __________________________________ *)
+(* Errormessages for Main-Textdisplay *)
+
+
+(* ____________________ *)
+(* Call Error Functions *)
+FehlerHilfs(ID:=FaultID, FAnz:=DisplayNrHilfs, EF:=ErrorsHilfs, F:=fHilfs);
+FehlerHaupt(ID:=FaultID, FAnz:=DisplayNrHaupt, EF:=ErrorsHaupt, F:=fHaupt);
+
+
+(* ___________________ *)
+(* Stop machine output *)
+fehlerausgabe_stop := FALSE;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="Zusatzzentrale">
+      <LineId Id="153" Count="10" />
+      <LineId Id="166" Count="0" />
+      <LineId Id="264" Count="0" />
+      <LineId Id="194" Count="2" />
+      <LineId Id="406" Count="1" />
+      <LineId Id="548" Count="0" />
+      <LineId Id="405" Count="0" />
+      <LineId Id="201" Count="4" />
+      <LineId Id="408" Count="7" />
+      <LineId Id="222" Count="38" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

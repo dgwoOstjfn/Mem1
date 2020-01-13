@@ -1,0 +1,398 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="FB_ContainerManager" Id="{7e81ff58-354a-4a2a-8837-4ddc2aa301e6}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_ContainerManager
+(*--------------------------------------------------------------------------------------
+Preh IMA AUTOMATION AMBERG GMBH        
+
+<DESC>
+
+Managing Container Content
+	- Managing Containter Counter (Current / Max)
+	- Output for Text Line for BDE-Statusdisplay-Line
+	- Output Button Description for Keba-Mobilepanel
+	- Managing Reset by Statusdisplay-Button (direct)
+	- Managing Reset by Keba-Mobilepanel-Button (3s Button pressed)
+	- Managing Reset Containtercontent by 3s "R" when Container is Full
+	- Message "Container Full"
+	- Early Warning "Container Nearly Full"
+
+Is Using ERRORS4 from FaultId for Textdisplay which is being handed over to this FB.
+
+</DESC>
+
+<KEYWORDS>
+</KEYWORDS>
+
+
+<DEPENDENCIES>
+</DEPENDENCIES>
+
+
+<CHANGES>
+Änderungen:					
+
+Date 		|	Version	|	Author	|	Description
+-------------------------------------------------------------------------------------------------------------------------------------------------
+2017-11-03	|			|	SBA		|	Initial Version
+	   <VERSION>1.0.0<VERSION
+			|			|			|
+			|			|			|
+			
+			
+</CHANGES>
+
+--------------------------------------------------------------------------------------*)
+
+(* _______________________ *)
+(* -- Standard-Inputs -- *)
+VAR_INPUT
+	BedienEinheit: 		ZENTR_DATA;		(* Central *)
+	FaultID: 			BYTE := 0;		(* ID for Error Array *)
+	DisplayNr: 			INT := 1;		(* Number of Textdisplay *)
+END_VAR
+
+
+(* ___________________________________ *)
+(* -- Specific Interface to Station -- *)
+VAR_INPUT PERSISTENT
+	in_sStatstringname_15_digits		:STRING(15)		:= '      M10 ST150';
+	in_sContainerName_24_digits			:STRING(24) 	:= 'NAME_ME';
+	in_iBdeButtonResetCounter			:INT := 0;		(* number of the statusdisplay button at BDE-Online for resetting the container counter *)
+	in_iKebaPanelNrResetCounter			:INT := 0;		(* number of the Kebapanel on which a reset button for reset container shall be viewed *)
+	in_iKebaPanelButtonNrResetCounter	:INT := 0;		(* number of the Button 1("F1") - 8 ("F8") at Kebapanel where container-counter can be reset *)
+	
+	in_diPartsMaxInContainer			:DINT := 100;	(* max containter content *)
+	in_diPartsEarlyWarningInContainer	:DINT := 95; 	(* num of parts in containter for displaying early warning *)
+	in_diPartsToCount					:DINT := 0; 	(* every cycle the containter-content is increased by this number of parts *) 
+	
+	in_bDisplayMessages					:BOOL:=FALSE; 	(* StatEin / enable message viewing in textdisplay of BDE-Online *)
+END_VAR
+VAR_OUTPUT PERSISTENT
+	out_bFaultStopDroppingParts			:BOOL:=FALSE; 	(* Stop Station from dropping parts into the container because the container ist full *)
+	out_bWarning						:BOOL:=FALSE; 	(* Call User - Box nearly Full *)
+	BDE_out_Statusdisplayline			:DTBDEShowElement;
+END_VAR
+
+
+(* ________________________ *)
+(* -- Standard-Variables -- *)
+VAR PERSISTENT
+	Waiting:			BOOL;			(* Station Waiting *)
+	i:					INT;			(* index-runner for loops *)
+END_VAR
+
+
+(* ___________________ *)
+(* -- Error-Array 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Error 01 *)		(Prio := ErrZyl, Nr:=1251, Txt:='/01            '),
+	(* Error 02 *)		(Prio := ErrFw,  Nr:=1252, Txt:='/02            '),
+	(* Error 03 *)		(Prio := ErrFw,	 Nr:=1253, Txt:='/03            '),
+	(* Error 04 *)		(Prio := ErrFw,	 Nr:=1254, Txt:='/04            '),
+	(* Error 05 *)		(Prio := ErrFw,	 Nr:=1255, Txt:='/05            '),
+	(* Error 06 *)		(Prio := ErrFw,	 Nr:=1256, Txt:='/06            '),
+	(* Error 07 *)		(Prio := ErrFw,	 Nr:=1257, Txt:='/07            '),
+	(* Error 08 *)		(Prio := ErrFw,	 Nr:=1258, Txt:='/08            '),
+	(* Error 09 *)		(Prio := ErrFw,	 Nr:=1259, Txt:='/09            '),
+	(* Error 10 *)		(Prio := ErrFw,	 Nr:=1260, Txt:='/10            '),
+	(* Error 11 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/11            '),
+	(* Error 12 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/12            '),
+	(* Error 13 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/13            '),
+	(* Error 14 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/14            '),
+	(* Error 15 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/15            '),
+	(* Error 16 *)		(Prio := ErrZyl, Nr:= 510, Txt:='/16            ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: ERRORANZ4;
+END_VAR
+VAR CONSTANT
+	feContainerFull								:INT := 01;
+	feContainerNearlyFull_ResetStatusdisplay	:INT := 02;
+	feContainerNearlyFull_ResetF1				:INT := 03;
+	feContainerNearlyFull_ResetF2				:INT := 04;
+	feContainerNearlyFull_ResetF3				:INT := 05;
+	feContainerNearlyFull_ResetF4				:INT := 06;
+	feContainerNearlyFull_ResetF5				:INT := 07;
+	feContainerNearlyFull_ResetF6				:INT := 08;
+	feContainerNearlyFull_ResetF7				:INT := 09;
+	feContainerNearlyFull_ResetF8				:INT := 10;
+END_VAR
+(*
+MV,1251,*************** §Container§ §Full§ - §empty§ 
+MV,1251,§and§ §acknowledge by§ 3s §Button§ "R" 
+MV,1252,*************** §Container§ §nearly§ §full§  
+MV,1252,§Reset at§ §Statusdisplay§
+MV,1253,*************** §Container§ §nearly§ §full§  
+MV,1253,§Reset at§ §Statusdisplay§ / 3s."F1" §at Panel§
+MV,1254,*************** §Container§ §nearly§ §full§  
+MV,1254,§Reset at§ §Statusdisplay§ / 3s."F2" §at Panel§
+MV,1255,*************** §Container§ §nearly§ §full§  
+MV,1255,§Reset at§ §Statusdisplay§ / 3s."F3" §at Panel§
+MV,1256,*************** §Container§ §nearly§ §full§  
+MV,1256,§Reset at§ §Statusdisplay§ / 3s."F4" §at Panel§
+MV,1257,*************** §Container§ §nearly§ §full§  
+MV,1257,§Reset at§ §Statusdisplay§ / 3s."F5" §at Panel§
+MV,1258,*************** §Container§ §nearly§ §full§  
+MV,1258,§Reset at§ §Statusdisplay§ / 3s."F6" §at Panel§
+MV,1259,*************** §Container§ §nearly§ §full§  
+MV,1259,§Reset at§ §Statusdisplay§ / 3s."F7" §at Panel§
+MV,1260,*************** §Container§ §nearly§ §full§  
+MV,1260,§Reset at§ §Statusdisplay§ / 3s."F8" §at Panel§
+*)
+
+
+
+
+(* _____________________ *)
+(* -- Local Variables -- *)
+VAR PERSISTENT
+	_diContainerContent			:DINT := 0; (* Current Parts in Box *)
+	_bEarlyWarning				:BOOL:=FALSE;
+
+	_strResetCounter			:STRING(255);
+	_strStatusdisplayline		:STRING(255);
+
+	_storedContainercontent		:DINT;
+	_storedContaintervolume		:DINT;
+END_VAR
+VAR
+	ton_R_3s					:TON;
+	tonKebaResetContainer		:TON;
+END_VAR
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ____________________ *)
+(* -- Initialisation -- *)
+IF Neustart OR g_bOnlineChange THEN
+	FOR i := 1 TO ErrMaxBits BY 1 DO
+		Errors1[i].Txt := RIGHT(CONCAT('               ',in_sStatstringname_15_digits),15);
+	END_FOR
+END_IF
+
+
+(* _________________ *)
+(* -- Count Parts -- *)
+IF in_diPartsToCount <> 0 THEN
+	_diContainerContent := _diContainerContent + in_diPartsToCount;
+	in_diPartsToCount := 0;
+END_IF
+_bEarlyWarning 		:= in_bDisplayMessages AND (_diContainerContent >= in_diPartsEarlyWarningInContainer);
+IF _bEarlyWarning THEN
+	f1[feContainerNearlyFull_ResetStatusdisplay] 	:= in_iKebaPanelButtonNrResetCounter = 0;
+	f1[feContainerNearlyFull_ResetF1]				:= in_iKebaPanelButtonNrResetCounter = 1; (* F1 *)
+	f1[feContainerNearlyFull_ResetF2]				:= in_iKebaPanelButtonNrResetCounter = 2; (* F2 *)
+	f1[feContainerNearlyFull_ResetF3]				:= in_iKebaPanelButtonNrResetCounter = 3; (* F3 *)
+	f1[feContainerNearlyFull_ResetF4]				:= in_iKebaPanelButtonNrResetCounter = 4; (* F4 *)
+	f1[feContainerNearlyFull_ResetF5]				:= in_iKebaPanelButtonNrResetCounter = 5; (* F5 *)
+	f1[feContainerNearlyFull_ResetF6]				:= in_iKebaPanelButtonNrResetCounter = 6; (* F6 *)
+	f1[feContainerNearlyFull_ResetF7]				:= in_iKebaPanelButtonNrResetCounter = 7; (* F7 *)
+	f1[feContainerNearlyFull_ResetF8]				:= in_iKebaPanelButtonNrResetCounter = 8; (* F8 *)
+END_IF
+
+(* Reset faults if counter value has been reseted *)
+f1[feContainerFull] := in_bDisplayMessages AND (_diContainerContent >= in_diPartsMaxInContainer);
+
+IF _diContainerContent < in_diPartsEarlyWarningInContainer THEN
+	f1[feContainerNearlyFull_ResetStatusdisplay] 	:= FALSE;
+	f1[feContainerNearlyFull_ResetF1]				:= FALSE;
+	f1[feContainerNearlyFull_ResetF2]				:= FALSE;
+	f1[feContainerNearlyFull_ResetF3]				:= FALSE;
+	f1[feContainerNearlyFull_ResetF4]				:= FALSE;
+	f1[feContainerNearlyFull_ResetF5]				:= FALSE;
+	f1[feContainerNearlyFull_ResetF6]				:= FALSE;
+	f1[feContainerNearlyFull_ResetF7]				:= FALSE;
+	f1[feContainerNearlyFull_ResetF8]				:= FALSE;
+END_IF
+
+(* Reset by 3s Button "R" if Full *)
+ton_R_3s( PT := T#3S );
+ton_R_3s.IN := Bedieneinheit.hm_quit;
+IF 		f1[feContainerFull]
+	AND	F_FehlerWirdAngezeigt( FaultId, Errors1[feContainerFull], DisplayNr)
+	AND	ton_R_3s.Q
+THEN
+	_diContainerContent := 0;
+END_IF
+
+
+(* Reset Containter Counter by 3s Button F1/F2/.../F8 *)
+IF 	in_iKebaPanelNrResetCounter 	>= 1 
+AND	in_iKebaPanelNrResetCounter 	<= gcKebaMaxPanel
+THEN 
+	CASE in_iKebaPanelButtonNrResetCounter OF
+	1:	tonKebaResetContainer( IN := gKebaDataToSps[in_iKebaPanelNrResetCounter].Bedienung.Taste_F1, PT := T#3S );
+	2:	tonKebaResetContainer( IN := gKebaDataToSps[in_iKebaPanelNrResetCounter].Bedienung.Taste_F2, PT := T#3S );
+	3:	tonKebaResetContainer( IN := gKebaDataToSps[in_iKebaPanelNrResetCounter].Bedienung.Taste_F3, PT := T#3S );
+	4:	tonKebaResetContainer( IN := gKebaDataToSps[in_iKebaPanelNrResetCounter].Bedienung.Taste_F4, PT := T#3S );
+	5:	tonKebaResetContainer( IN := gKebaDataToSps[in_iKebaPanelNrResetCounter].Bedienung.Taste_F5, PT := T#3S );
+	6:	tonKebaResetContainer( IN := gKebaDataToSps[in_iKebaPanelNrResetCounter].Bedienung.Taste_F6, PT := T#3S );
+	7:	tonKebaResetContainer( IN := gKebaDataToSps[in_iKebaPanelNrResetCounter].Bedienung.Taste_F7, PT := T#3S );
+	8:	tonKebaResetContainer( IN := gKebaDataToSps[in_iKebaPanelNrResetCounter].Bedienung.Taste_F8, PT := T#3S );
+	END_CASE
+END_IF
+IF tonKebaResetContainer.Q THEN
+	_diContainerContent := 0;
+END_IF	
+
+(* Reset Container Counter by Actionbutton *)
+IF 	in_iBdeButtonResetCounter = BDEButton
+AND in_iBdeButtonResetCounter > 0
+THEN
+	_diContainerContent := 0;
+END_IF
+
+
+
+IF 		Neustart 
+	OR 	g_bOnlineChange
+	OR	_storedContainercontent <> _diContainerContent
+	OR	_storedContaintervolume <> in_diPartsMaxInContainer
+THEN
+	_storedContainercontent := _diContainerContent;
+	_storedContaintervolume := in_diPartsMaxInContainer;
+
+	(* Show Containercontent for Statusdisplay *)
+	_strResetCounter := '';
+	CASE in_iKebaPanelButtonNrResetCounter OF
+	1:	_strResetCounter := 	CONCAT(	_strResetCounter, '"F1" '	);
+	2:	_strResetCounter := 	CONCAT(	_strResetCounter, '"F2" '	);
+	3:	_strResetCounter := 	CONCAT(	_strResetCounter, '"F3" '	);
+	4:	_strResetCounter := 	CONCAT(	_strResetCounter, '"F4" '	);
+	5:	_strResetCounter := 	CONCAT(	_strResetCounter, '"F5" '	);
+	6:	_strResetCounter := 	CONCAT(	_strResetCounter, '"F6" '	);
+	7:	_strResetCounter := 	CONCAT(	_strResetCounter, '"F7" '	);
+	8:	_strResetCounter := 	CONCAT(	_strResetCounter, '"F8" '	);
+	END_CASE
+	
+	_strResetCounter := CONCAT( 	_strResetCounter, '§Empty§ §Box§ ' );
+	_strResetCounter := CONCAT(		_strResetCounter, in_sContainerName_24_digits );
+	_strResetCounter := CONCAT(		_strResetCounter, ' ' );
+	
+	
+	_strResetCounter := CONCAT(		_strResetCounter, '(' );
+	_strResetCounter := CONCAT( 	_strResetCounter, DINT_TO_STRING(_diContainerContent) );
+	_strResetCounter := CONCAT( 	_strResetCounter, '/' );
+	_strResetCounter := CONCAT( 	_strResetCounter, DINT_TO_STRING(in_diPartsMaxInContainer) );
+	_strResetCounter := CONCAT( 	_strResetCounter, ')');
+	
+
+	
+	(* Build Statusdisplayline for Counters-Overview  *)
+	BDE_out_Statusdisplayline.ShowElement	:= TRUE;
+	BDE_out_Statusdisplayline.ShowDInt		:= FALSE;
+	BDE_out_Statusdisplayline.ShowString	:= TRUE;
+	BDE_out_Statusdisplayline.Digits		:= -1;
+	
+	_strStatusdisplayline := in_sContainerName_24_digits;
+	_strStatusdisplayline := CONCAT( _strStatusdisplayline, ' (');
+	_strStatusdisplayline := CONCAT( _strStatusdisplayline, DINT_TO_STRING(_diContainerContent));(* Content *)
+	_strStatusdisplayline := CONCAT( _strStatusdisplayline, '/');
+	_strStatusdisplayline := CONCAT( _strStatusdisplayline, DINT_TO_STRING(in_diPartsMaxInContainer));(* Volume *)
+	_strStatusdisplayline := CONCAT( _strStatusdisplayline, ')');
+	
+	IF LEN(_strStatusdisplayline) > 21 THEN
+		BDE_out_Statusdisplayline.Label1 	:= LEFT( _strStatusdisplayline,21 );
+		BDE_out_Statusdisplayline.ValString	:= MID( _strStatusdisplayline,LEN(_strStatusdisplayline)-21,22 );
+	ELSE
+		BDE_out_Statusdisplayline.Label1 	:= _strStatusdisplayline;
+		BDE_out_Statusdisplayline.ValString	:= '';
+	END_IF
+END_IF
+
+
+BDE_out_Statusdisplayline.Color			:= 0;
+IF (_diContainerContent >= in_diPartsMaxInContainer) THEN		
+	IF bl_takt THEN	BDE_out_Statusdisplayline.Color		:= clRed;
+	ELSE			BDE_out_Statusdisplayline.Color		:= clBlack;	END_IF
+
+ELSIF (_diContainerContent >= in_diPartsEarlyWarningInContainer) THEN		
+	IF bl_takt THEN	BDE_out_Statusdisplayline.Color		:= clOlive;
+	ELSE			BDE_out_Statusdisplayline.Color		:= clBlack;	END_IF
+END_IF
+
+
+
+(* Assign Text for Actionbutton in every PLC Cycle *)
+IF (in_iBdeButtonResetCounter > 0) THEN
+	BDEAction[in_iBdeButtonResetCounter] := _strResetCounter;
+END_IF
+IF 	in_iKebaPanelNrResetCounter 	>= 1 
+AND	in_iKebaPanelNrResetCounter 	<= gcKebaMaxPanel
+AND in_iKebaPanelButtonNrResetCounter > 0
+THEN
+	gKebaDataToPanel[in_iKebaPanelNrResetCounter].F_Tasten[in_iKebaPanelButtonNrResetCounter].Beschriftung 	
+		:= _strResetCounter;
+END_IF
+
+	
+
+
+(* __________________ *)
+(* -- Treat Errors -- *)
+Fehler1( ID:= FaultID, FAnz:= DisplayNr, EF:= Errors1, F:= f1 );
+out_bFaultStopDroppingParts	:= f1[feContainerFull];	
+out_bWarning := _bEarlyWarning;
+
+
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="FB_ContainerManager">
+      <LineId Id="1307" Count="6" />
+      <LineId Id="2361" Count="0" />
+      <LineId Id="1315" Count="0" />
+      <LineId Id="1318" Count="17" />
+      <LineId Id="2537" Count="0" />
+      <LineId Id="2535" Count="1" />
+      <LineId Id="2549" Count="0" />
+      <LineId Id="2538" Count="0" />
+      <LineId Id="2540" Count="7" />
+      <LineId Id="2539" Count="0" />
+      <LineId Id="2548" Count="0" />
+      <LineId Id="1338" Count="7" />
+      <LineId Id="1347" Count="36" />
+      <LineId Id="2185" Count="0" />
+      <LineId Id="2184" Count="0" />
+      <LineId Id="2183" Count="0" />
+      <LineId Id="1384" Count="23" />
+      <LineId Id="1419" Count="6" />
+      <LineId Id="1427" Count="1" />
+      <LineId Id="2143" Count="0" />
+      <LineId Id="1429" Count="0" />
+      <LineId Id="2144" Count="0" />
+      <LineId Id="1430" Count="0" />
+      <LineId Id="2145" Count="0" />
+      <LineId Id="1431" Count="8" />
+      <LineId Id="2158" Count="2" />
+      <LineId Id="2162" Count="0" />
+      <LineId Id="2166" Count="0" />
+      <LineId Id="2165" Count="0" />
+      <LineId Id="2175" Count="0" />
+      <LineId Id="2163" Count="0" />
+      <LineId Id="2169" Count="1" />
+      <LineId Id="2164" Count="0" />
+      <LineId Id="1786" Count="1" />
+      <LineId Id="1791" Count="1" />
+      <LineId Id="1788" Count="2" />
+      <LineId Id="1964" Count="6" />
+      <LineId Id="1622" Count="0" />
+      <LineId Id="1440" Count="10" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

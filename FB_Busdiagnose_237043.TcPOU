@@ -1,0 +1,371 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.6">
+  <POU Name="FB_Busdiagnose_237043" Id="{2d0df1a6-1fbd-4982-b267-551f5bb69938}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_Busdiagnose_237043
+(*--------------------------------------------------------------------------------------
+        IMA AUTOMATION GMBH        
+
+ 		Bei jeder Änderung bitte Datum, Name und Änderungsbeschreibung eintragen!
+ 		
+ 		Datum 		|	Autor				|	Beschreibung
+		--------------------------------------------------------------------------------
+		05.10.2006	|	Bartmann			|	CANopen-Boxteilnehmerdiagnose
+					|						|
+		13.10.2006	|	Bartmann			|	Verlagerung der Fehlererzeugungslogik
+					|						|	vom Modul in den Baustein hinein
+					|						|
+		24.10.2006	|	Bartmann			|	Einführung von Bereichsfiltern für
+					|						|	die Meldungswiedergabe von Busfehlern
+					|						|
+		12.11.2008	|	Beer				|	USV-Überwachung eingefügt
+					|						|					
+		17.03.2009	|	Beer				|	Soll-Ist Vergleich der Klemmenanzahl eingefuegt
+					|						|					
+		20.05.2009	|	Sterk Günter		|	CanOpen gelöscht, Festo CPX eingefügt
+					|						|					
+		24.11.2009	|	Sterk Günter		|	ERRORZYL mit 8 Zeichen eingeführt
+					|						|	EtherCAT,CanOPEN,Profibus,Panel 
+					|						|					
+		
+
+----------------------------------------------------------------------------------------*)
+
+
+(* -- Standard-Eingangsvariablen -- *)
+VAR_INPUT
+	FaultID: 			BYTE := 0;		(* ID für Fehlerfeld *)
+	DisplayNr: 			INT := 1;		(* Nummer der Textanzeige *)
+	StatString: 		STRING(3);		(* Stationsstring *)
+END_VAR
+
+(* -- Ausgang für Zentrale -- *)
+VAR_OUTPUT
+	out_bModulStop	:BOOL:=FALSE; 	(* wenn TRUE, soll Modul stehen bleiben, da Busfehler auftreten *)
+END_VAR
+
+
+(* -- Lokale Variablen -- *)
+VAR PERSISTENT
+
+	(* - Merker für Ereignisse / Sollwertvorgaben - *)
+	m_usiSollCanNodeState			:USINT:=0;
+	ma_usiLastErrorCanNodeState		:ARRAY [1..g_cAnzCanNodes] OF USINT:=[g_cAnzCanNodes(0)];
+
+	ma_uiLastErrorPanelCouplerState	:ARRAY [1..g_cAnzPanels] OF UINT:=[g_cAnzPanels(0)];
+	ma_uiLastErrorPanelBoxState		:ARRAY [1..g_cAnzPanels] OF UINT:=[g_cAnzPanels(0)];
+
+	(* - Sonstige Variablen - *)
+	Schritt			:INT:=0;
+	i				:INT:=0;
+
+	sIst			:STRING:= '';
+	sSoll			:STRING:= '';
+
+	bEbusOk			:BOOL:=TRUE;
+	bAnzKlemmenOk	:BOOL:=TRUE;
+	bProfibusboxOk	:BOOL:=TRUE;
+	bCanNodeOk		:BOOL:=TRUE;
+	bCanMasterOk	:BOOL:=TRUE;
+
+	bPanelOk		:BOOL:=TRUE;
+
+	bCPXOk			:BOOL:=TRUE;
+END_VAR
+
+
+(* -- Fehlerarray 1 -- *)
+VAR
+	Errors1: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Fehler 01 *)		(Prio := ErrZentr,  Nr:= 541, Txt:='        '),
+	(* Fehler 02 *)		(Prio := ErrZentr,  Nr:= 542, Txt:='        '), //542
+	(* Fehler 03 *)		(Prio := ErrZentr,  Nr:= 543, Txt:='        '),
+	(* Fehler 04 *)		(Prio := ErrZentr,  Nr:= 544, Txt:='        '),
+	(* Fehler 05 *)		(Prio := ErrZentr,  Nr:= 545, Txt:='        '),
+	(* Fehler 06 *)		(Prio := ErrZentr,  Nr:= 548, Txt:='        '),
+	(* Fehler 07 *)		(Prio := ErrZentr,  Nr:= 549, Txt:='        '),
+	(* Fehler 08 *)		(Prio := ErrZyl,    Nr:= 045, Txt:='        '),
+	(* Fehler 09 *)		(Prio := ErrZentr,  Nr:= 553, Txt:='        '),
+	(* Fehler 10 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/10     '),
+	(* Fehler 11 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/11     '),
+	(* Fehler 12 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/12     '),
+	(* Fehler 13 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/13     '),
+	(* Fehler 14 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/14     '),
+	(* Fehler 15 *)		(Prio := ErrFW,     Nr:= 031, Txt:='        '),
+	(* Fehler 16 *)		(Prio := ErrZentr,  Nr:= 547, Txt:='        ')];
+	f1: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler1: 			ERRORANZ;
+
+	Errors2: ARRAY[1..ErrMaxBits] OF ERRDAT := [
+	(* Fehler 01 *)		(Prio := ErrZentr,  Nr:= 550, Txt:='     MB '),
+	(* Fehler 02 *)		(Prio := ErrZentr,  Nr:= 550, Txt:='     0  '),
+	(* Fehler 03 *)		(Prio := ErrZentr,  Nr:= 551, Txt:='     1  '),
+	(* Fehler 04 *)		(Prio := ErrZentr,  Nr:= 551, Txt:='     2a '),
+	(* Fehler 05 *)		(Prio := ErrZentr,  Nr:= 551, Txt:='     2b '),
+	(* Fehler 06 *)		(Prio := ErrZentr,  Nr:= 551, Txt:='     3.3'),
+	(* Fehler 07 *)		(Prio := ErrZentr,  Nr:= 551, Txt:='     5  '),
+	(* Fehler 08 *)		(Prio := ErrZentr,  Nr:= 551, Txt:='     12 '),
+	(* Fehler 09 *)		(Prio := ErrZentr,  Nr:= 552, Txt:='     0  '),
+	(* Fehler 10 *)		(Prio := ErrZentr,  Nr:= 552, Txt:='     1  '),
+	(* Fehler 11 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/11     '),
+	(* Fehler 12 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/12     '),
+	(* Fehler 13 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/13     '),
+	(* Fehler 14 *)		(Prio := ErrZyl,    Nr:= 510, Txt:='/14     '),
+	(* Fehler 15 *)		(Prio := ErrZyl,    Nr:= 031, Txt:='/15     '),
+	(* Fehler 16 *)		(Prio := ErrZyl,	Nr:= 547, Txt:='/16     ')];
+	f2: ARRAY [1..ErrMaxBits] OF BOOL := [ErrMaxBits(FALSE)];
+	Fehler2: 			ERRORANZ;
+END_VAR
+VAR CONSTANT
+(* Fehlerarray 1 *)
+	feEbus				:INT:=01;
+	feEbusAnzKlemmen	:INT:=02;
+	feProfibusBox		:INT:=03;
+	feCanMaster			:INT:=04;
+	fePanel				:INT:=05;
+	feCanNode			:INT:=06;
+	feCPX				:INT:=07;
+	feEtherCat			:INT:=09;
+	feWarnungUSV		:INT:=15;
+
+(* Fehlerarray 2 *)
+	feTempMB			:INT:= 1;
+	feTemp0				:INT:= 2;
+	feTemp1				:INT:= 3;
+	feVolt2a			:INT:= 4;
+	feVolt2b			:INT:= 5;
+	feVolt3_3			:INT:= 6;
+	feVolt5_0			:INT:= 7;
+	feVolt12_0			:INT:= 8;
+	feFan0				:INT:= 9;
+	feFan1				:INT:=10;
+END_VAR
+
+(*
+MV,541,*** Busfehler EtherCat-Bus
+MV,541,***** E-Bus-Klemmen gefunden
+MV,543,*** Busfehler Profibus-Box *****
+MV,544,*** Fehler canOPEN-Master A***.**
+MV,545,*** Fehler Commander-Panel *****
+MV,547,*** Busfehler *****
+MV,548,*** Busfehler CANopen-Node *****
+MV,549,M*** Busfehler CPX-Ventilinsel *****
+*)
+VAR
+	t_erkennLang:		TON;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* Fehlerbildung bei Neustart erst nach Wartezeit *)
+t_erkennLang(IN:= t_erkenn.Q, PT:= t#9s);
+IF t_erkennLang.Q THEN
+
+	IF mParam[MP_SMBDiagnose] > 0.5 THEN
+		f2[feTempMB] := ga_Motherboard_UINT[0] > 100;
+		IF f2[feTempMB] THEN
+			Errors2[feTempMB].Txt := CONCAT(RIGHT(CONCAT('     ',UINT_TO_STRING(ga_Motherboard_UINT[0])),5),'MB ');
+		END_IF;
+
+		f2[feTemp0] := ga_Motherboard_USINT[0] > 100;
+		IF f2[feTemp0] THEN
+			Errors2[feTemp0].Txt := CONCAT(RIGHT(CONCAT('     ',USINT_TO_STRING(ga_Motherboard_USINT[0])),5),'0  ');
+		END_IF;
+
+		f2[feTemp1] := ga_Motherboard_USINT[1] > 100;
+		IF f2[feTemp1] THEN
+			Errors2[feTemp1].Txt := CONCAT(RIGHT(CONCAT('     ',USINT_TO_STRING(ga_Motherboard_USINT[1])),5),'1  ');
+		END_IF;
+
+		f2[feVolt2a] := (ga_Motherboard_UINT[4] < 80) OR (ga_Motherboard_UINT[4] > 150);
+		IF f2[feVolt2a] THEN
+			Errors2[feVolt2a].Txt := CONCAT(RIGHT(CONCAT('     ',UINT_TO_STRING(ga_Motherboard_UINT[4])),5),'2a ');
+		END_IF;
+
+		f2[feVolt2b] := (ga_Motherboard_UINT[5] < 80) OR (ga_Motherboard_UINT[5] > 150);
+		IF f2[feVolt2b] THEN
+			Errors2[feVolt2b].Txt := CONCAT(RIGHT(CONCAT('     ',UINT_TO_STRING(ga_Motherboard_UINT[5])),5),'2b ');
+		END_IF;
+
+		f2[feVolt3_3] := (ga_Motherboard_UINT[6] < 310) OR (ga_Motherboard_UINT[6] > 350);
+		IF f2[feVolt3_3] THEN
+			Errors2[feVolt3_3].Txt := CONCAT(RIGHT(CONCAT('     ',UINT_TO_STRING(ga_Motherboard_UINT[6])),5),'3.3');
+		END_IF;
+
+		f2[feVolt5_0] := (ga_Motherboard_UINT[7] < 480) OR (ga_Motherboard_UINT[7] > 540);
+		IF f2[feVolt5_0] THEN
+			Errors2[feVolt5_0].Txt := CONCAT(RIGHT(CONCAT('     ',UINT_TO_STRING(ga_Motherboard_UINT[7])),5),'5.0');
+		END_IF;
+
+		f2[feVolt12_0] := (ga_Motherboard_UINT[8] < 1080) OR (ga_Motherboard_UINT[8] > 1320);
+		IF f2[feVolt12_0] THEN
+			Errors2[feVolt12_0].Txt := CONCAT(RIGHT(CONCAT('     ',UINT_TO_STRING(ga_Motherboard_UINT[8])),5),'12 ');
+		END_IF;
+
+		IF g_bMotherboardDiagnoseLuefterVorhanden THEN
+			f2[feFan0] := ga_Motherboard_UINT[1] < 4000;
+			IF f2[feFan0] THEN
+				Errors2[feFan0].Txt := CONCAT(RIGHT(CONCAT('     ',UINT_TO_STRING(ga_Motherboard_UINT[1])),5),'0  ');
+			END_IF;
+	
+			f2[feFan1] := ga_Motherboard_UINT[2] < 4000;
+			IF f2[feFan1] THEN
+				Errors2[feFan1].Txt := CONCAT(RIGHT(CONCAT('     ',UINT_TO_STRING(ga_Motherboard_UINT[2])),5),'1  ');
+			END_IF
+		END_IF
+	END_IF
+
+	(* Meldung E-Bus *)
+	IF g_bEtherCAT THEN
+		bEbusOk := g_uiEbusDevState=0;
+		bAnzKlemmenOk := (g_uiEbusSlaveCount = g_cEbusSlaveCountSoll);
+		IF NOT bEbusOk THEN
+			f1[feEbus] := TRUE;
+
+			(* Ist-Zahl auf 8 Zeichen rechtsbündig begrenzen *)
+			sIst := UINT_TO_STRING( g_uiEbusSlaveCount );
+			sIst := RIGHT( CONCAT( '        ', sIst ), 8 );
+			Errors1[feEbus].Txt := sIst;
+		ELSE
+			IF NOT bAnzKlemmenOk THEN
+				f1[feEbusAnzKlemmen] := TRUE;
+				(* Ist-Zahl auf 3 Zeichen rechtsbündig begrenzen *)
+				sIst := UINT_TO_STRING( g_uiEbusSlaveCount );
+				sIst := RIGHT( CONCAT( '        ', sIst ), 3 );
+				(* Soll-Zahl auf 3 Zeichen rechtsbündig begrenzen *)
+				sSoll := UINT_TO_STRING( g_cEbusSlaveCountSoll );
+				sSoll := RIGHT( CONCAT( '        ', sSoll ), 3 );
+				Errors1[feEbusAnzKlemmen].Txt := LEFT(CONCAT(CONCAT(sSoll,sIst),'    '),8);
+			
+			END_IF
+		END_IF
+	END_IF
+
+
+	(* Meldung Panel *)
+	IF 	g_cAnzPanels > 0 THEN
+
+		FOR i := 1 TO g_cAnzPanels BY 1 DO
+			bPanelOk :=	ga_uiPanelCouplerState[i].1=FALSE	(* Terminal bus error *)
+					AND	ga_uiPanelCouplerState[i].2=FALSE	(* Configuration error *)
+					AND (	ga_uiPanelBoxState[i]=0
+						OR	ga_uiPanelBoxState[i]=1	);
+
+			IF NOT bPanelOk THEN
+				ma_uiLastErrorPanelCouplerState[i] := ga_uiPanelCouplerState[i];
+				ma_uiLastErrorPanelBoxState[i] := ga_uiPanelBoxState[i];
+
+				f1[fePanel] := TRUE;
+				Errors1[fePanel].Txt := ga_sPanelName[i];
+			END_IF
+
+		END_FOR
+	END_IF
+
+	(* Meldung CANopen-Nodes *)
+	IF 	(g_cAnzCanNodes > 0) AND g_bCanNodesVorhanden THEN
+		FOR i := 1 TO g_cAnzCanNodes BY 1 DO
+			bCanNodeOk := ga_usiCanNodeState[i] = m_usiSollCanNodeState;
+			IF NOT bCanNodeOk THEN
+				ma_usiLastErrorCanNodeState[i] := ga_usiCanNodeState[i];
+				f1[feCanNode] := TRUE;
+				Errors1[feCanNode].Txt := ga_sCanNodeName[i];
+			END_IF
+
+		END_FOR
+	END_IF
+
+	(* Meldung Canbus-Master *)
+	IF 	(g_cAnzCanMaster > 0) AND g_bCanMasterVorhanden THEN
+		FOR i := 1 TO g_cAnzCanMaster BY 1 DO
+			bCanMasterOk := ga_usiCanMasterError[i]=0;
+			IF NOT bCanMasterOk AND NOT f1[feCanNode] THEN
+				f1[feCanMaster] := TRUE;
+				Errors1[feCanMaster].Txt := ga_sCanMaster[i];
+			END_IF
+
+		END_FOR
+	END_IF
+
+	(* Alle Profibus-Teilnehmer beachten *)
+	IF 	(g_cAnzProfibusBoxen > 0) AND g_bProfibusBoxenVorhanden THEN
+		FOR i := 1 TO g_cAnzProfibusBoxen BY 1 DO
+
+			bProfibusboxOk := ga_usiProfibusBoxDpState[i]=0;
+			IF NOT bProfibusboxOk THEN
+				f1[feProfibusBox] := TRUE;
+				Errors1[feProfibusBox].Txt := ga_sProfibusBoxName[i];
+			END_IF
+
+		END_FOR
+	END_IF
+
+	(* Alle CPX-Teilnehmer beachten *)
+	IF 	g_cAnzCPX > 0 THEN
+		FOR i := 1 TO g_cAnzCPX BY 1 DO
+
+			(* 	Bit		Diagnoseinformation bei 1-Signal			Beschreibung
+				----------------------------------------------------------------------------------------
+				0		Fehler an Ventil bzw. Pneumatikmodul		Modultyp, bei dem ein Fehler auftrat
+				1		Fehler an Ausgangsmodul						"
+				2		Fehler an Eingangsmodul						"
+				3		Fehler an Analogmodul oder Technologiemodul	"
+				----------------------------------------------------------------------------------------
+				4		Unterspannung								Fehlerart
+				5		Kurzschluss / Überlast						"
+				6		Drahtbruch									"
+				7		Anderer Fehler								"                                   *)
+
+			bCPXOk :=	NOT(	g_uiCPXState0[i].5		(* Kurzschluss / Überlast *)
+							OR	g_uiCPXState0[i].6		(* Drahtbruch *)
+							OR	g_uiCPXState0[i].1		(* Ausgangsmodul *)
+							OR	g_uiCPXState0[i].2	);	(* Eingangsmodul *)
+
+			IF NOT bCPXOk THEN
+
+				f1[feCPX]:= TRUE;
+				Errors1[feCPX].Txt := g_uiCPXDevName[i];
+			END_IF
+			bCPXOk := g_uiCPXState1[i]=0;
+			IF NOT bCPXOk THEN
+	
+				f1[feCPX]:= TRUE;
+				Errors1[feCPX].Txt := g_uiCPXDevName[i];
+			END_IF
+		END_FOR
+	END_IF
+
+	(* Warnung von USV *)
+	f1[feWarnungUSV] := UPS_ErrorBatt AND bl_takt;
+
+END_IF
+
+(* Stationsfehler und Fehlerbehandlung *)
+Fehler1(ID := FaultId+0, FAnz := DisplayNr,Anzahl := 16,EF:= Errors1, F:= f1);
+Fehler2(ID := FaultId+1, FAnz := DisplayNr,Anzahl := 16,EF:= Errors2, F:= f2);
+
+out_bModulStop :=
+		f1[feEbus]
+	OR	f1[feProfibusBox]
+	OR	f1[feCanMaster]
+	OR	f1[fePanel]
+	OR	f1[feCanNode]
+	OR	f1[feCPX]
+	OR	f2[feTempMB]
+	OR	f2[feTemp0]
+	OR	f2[feTemp1]
+	OR	f2[feVolt2a]
+	OR	f2[feVolt2b]
+	OR	f2[feVolt3_3]
+	OR	f2[feVolt5_0]
+	OR	f2[feVolt12_0]
+	OR	f2[feFan0]
+	OR	f2[feFan1]
+;
+
+EtherCat_Diagnose();
+]]></ST>
+    </Implementation>
+    <LineIds Name="FB_Busdiagnose_237043">
+      <LineId Id="160" Count="206" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

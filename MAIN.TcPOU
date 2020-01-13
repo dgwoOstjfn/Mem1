@@ -1,0 +1,696 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4022.16">
+  <POU Name="MAIN" Id="{07bf0ce6-a4fd-46f0-bbd2-8f72ed7bf592}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'Tc2GvlVarNames'}
+PROGRAM MAIN
+(*--------------------------------------------------------------------------------------
+Preh IMA Automation Amberg GmbH
+
+<CHANGES>
+At every change add date, version´s number, abbr. of name and describe change!
+
+Date 		|	Version	|	Author	|	change description		
+--------------------------------------------------------------------------------
+2017-07-04	|	1.00	|	SBA		|	initial version
+*)
+
+
+VAR
+	Verwalt: 					Zentrale_ST; (* main central *)
+	Urloeschen: 				Urloesch_ST; (* restart and reset all *)
+	BDEControl: 				BDE; (* monitor operating data *)
+	USV:						FB_USV24V_Schneider_CTEC;
+	TimeshiftPrevention:		FB_TimeshiftPrevention;
+	BDE_Show:					_BDE_SHOW;
+
+	M10:						M10;	
+	M20:						M20;
+	M30:						M30;
+	M40:						M40;
+	automatikbetrieb: 			BOOL;
+	i:							INT;
+	notaus: 					BOOL;
+	notentr: 					BOOL;
+	_BeltOn:					BOOL;
+	curPart:					INT := 1;
+	
+	_bCloseAllSockets:			BOOL:=FALSE;
+	fbSocketCloseAll:			FB_SocketCloseAll;
+	
+	TypwechselMPart1:				TYPWECHSELM;						// Baustein zur Auftragsübernahme
+	mpart_M20: 						Mpart_leer_ST; (* Leerfahren für Maschinenteil *)
+	mpart_M30: 						Mpart_leer_ST; (* Leerfahren für Maschinenteil *)
+	mpart_M40: 						Mpart_leer_ST; (* Leerfahren für Maschinenteil *)
+	
+	_allModules:				INT := 1;
+END_VAR
+
+
+VAR PERSISTENT
+	z1:								ZAEHLER; (* FB for processing countx *)
+
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* Main Central *)
+Verwalt();
+
+(* Commission´s Number for BDE *)
+BDE_sKommissionsNr := _AppInfo.ProjectName; (* Projektkennung an BDE senden *)
+
+
+(* Initialisation of step sequence diagnosis *)
+InitAnlage();
+
+
+
+
+(* Base parameters *)
+IF neustart THEN
+	modul_parameter.Zentr_Anzahl := 4;
+
+	modul_parameter.Zentr_Struct[M20_Zentrale].Bezeichnung 				:= '§Module§ 20';
+	modul_parameter.Zentr_Struct[M20_Zentrale].Druckwaechter_vz 		:= T#0.5S; (* Druckwächter um 0.5s verzögern *)
+	modul_parameter.Zentr_Struct[M20_Zentrale].Pneu_ein_schutz_offen	:= TRUE; (* Pneumatik einschalten bei offenem Schutz wegen einmaliger Bedieneinheit erlaubt *)
+	modul_parameter.Zentr_Struct[M20_Zentrale].Anlage_vz_aus_auto 		:= T#5S; (* Maschinenzyklus 4s *)
+
+	modul_parameter.Zentr_Struct[M30_Zentrale].Bezeichnung 				:= '§Module§ 30';
+	modul_parameter.Zentr_Struct[M30_Zentrale].Druckwaechter_vz 		:= T#0.5S; (* Druckwächter um 0.5s verzögern *)
+	modul_parameter.Zentr_Struct[M30_Zentrale].Pneu_ein_schutz_offen	:= TRUE; (* Pneumatik einschalten bei offenem Schutz wegen einmaliger Bedieneinheit erlaubt *)
+	modul_parameter.Zentr_Struct[M30_Zentrale].Anlage_vz_aus_auto 		:= T#5S; (* Maschinenzyklus 4s *)
+
+	modul_parameter.Zentr_Struct[M40_Zentrale].Bezeichnung 				:= '§Module§ 40';
+	modul_parameter.Zentr_Struct[M40_Zentrale].Druckwaechter_vz 		:= T#0.5S; (* Druckwächter um 0.5s verzögern *)
+	modul_parameter.Zentr_Struct[M40_Zentrale].Pneu_ein_schutz_offen	:= TRUE; (* Pneumatik einschalten bei offenem Schutz wegen einmaliger Bedieneinheit erlaubt *)
+	modul_parameter.Zentr_Struct[M40_Zentrale].Anlage_vz_aus_auto 		:= T#5S; (* Maschinenzyklus 4s *)
+END_IF
+
+
+(* mobilepanel (Keba) *)
+(* safety bypass allowed only once at the same time - first key-switch wins *)
+_M20_KBR1 := arrGuardBypass[M20_Zentrale,1] (* i.e.: AND NOT _KBR2 AND NOT _KBR3 AND NOT _KBR4 AND NOT _KBR5*);
+_M30_KBR1 := arrGuardBypass[M30_Zentrale,1] (* i.e.: AND NOT _KBR2 AND NOT _KBR3 AND NOT _KBR4 AND NOT _KBR5*);
+_M40_KBR1 := arrGuardBypass[M40_Zentrale,1] (* i.e.: AND NOT _KBR2 AND NOT _KBR3 AND NOT _KBR4 AND NOT _KBR5*); 
+(* n.n. _KBR2 := arrGuardBypass[Zentrale_Ltf,2] AND NOT _KBR1 AND NOT _KBR3 AND NOT _KBR4 AND NOT _KBR5;*)
+
+
+(* select which user elements are active *)
+IF _M20_KBR1 THEN 	_M20_bPanel1 := TRUE;	_M20_bCellButtons := FALSE; 
+ELSE				_M20_bPanel1 := TRUE;	_M20_bCellButtons := TRUE;
+END_IF
+
+IF _M30_KBR1 THEN 	_M30_bPanel1 := TRUE;	_M30_bCellButtons := FALSE; 
+ELSE				_M30_bPanel1 := TRUE;	_M30_bCellButtons := TRUE;
+END_IF
+
+IF _M40_KBR1 THEN 	_M40_bPanel1 := TRUE;	_M40_bCellButtons := FALSE; 
+ELSE				_M40_bPanel1 := TRUE;	_M40_bCellButtons := TRUE;
+END_IF
+
+
+
+g_bEnableMan := (BDE_iLoginLevel >= 2);
+KebaPanelV1.inb_Shutdown 		:= FALSE;
+KebaPanelV1.inb_Berechtigung[PANEL_M20]	:= _M20_KBR1 OR (g_bEnableMan (*			AND NOT _KBR2 	AND NOT _KBR3 	AND NOT _KBR4 	AND NOT _KBR5*)	) ;
+KebaPanelV1.inb_Berechtigung[PANEL_M30]	:= _M30_KBR1 OR (g_bEnableMan (*			AND NOT _KBR2 	AND NOT _KBR3 	AND NOT _KBR4 	AND NOT _KBR5*)	) ;
+KebaPanelV1.inb_Berechtigung[PANEL_M40]	:= _M40_KBR1 OR (g_bEnableMan (*			AND NOT _KBR2 	AND NOT _KBR3 	AND NOT _KBR4 	AND NOT _KBR5*)	) ;
+(* n.n. KebaPanelV1.inb_Berechtigung[PANEL_M10]	:= _KBR2 OR (g_bEnableMan AND NOT _KBR1 				AND NOT _KBR3 	AND NOT _KBR4 	AND NOT _KBR5	); *)
+
+KebaPanelV1.inb_Auto		[PANEL_M20]	:= mz[M20_Zentrale].hm_auto;
+KebaPanelV1.inb_Lampentest	[PANEL_M20]	:= mz[M20_Zentrale].lp_test;
+KebaPanelV1.inb_Leerfahren	[PANEL_M20]	:= mz[M20_Zentrale].mpart[Segment_1].hm_leer;
+KebaPanelV1.inb_Leergefahren[PANEL_M20]	:= mz[M20_Zentrale].mpart[Segment_1].leergefahren;
+
+KebaPanelV1.inb_Auto		[PANEL_M30]	:= mz[M30_Zentrale].hm_auto;
+KebaPanelV1.inb_Lampentest	[PANEL_M30]	:= mz[M30_Zentrale].lp_test;
+KebaPanelV1.inb_Leerfahren	[PANEL_M30]	:= mz[M30_Zentrale].mpart[Segment_1].hm_leer;
+KebaPanelV1.inb_Leergefahren[PANEL_M30]	:= mz[M30_Zentrale].mpart[Segment_1].leergefahren;
+
+KebaPanelV1.inb_Auto		[PANEL_M40]	:= mz[M40_Zentrale].hm_auto;
+KebaPanelV1.inb_Lampentest	[PANEL_M40]	:= mz[M40_Zentrale].lp_test;
+KebaPanelV1.inb_Leerfahren	[PANEL_M40]	:= mz[M40_Zentrale].mpart[Segment_1].hm_leer;
+KebaPanelV1.inb_Leergefahren[PANEL_M40]	:= mz[M40_Zentrale].mpart[Segment_1].leergefahren;
+
+
+
+
+(* panel shall be enabled
+		if no other panel already in manual mode  
+	and the override-key-switch of all other panels is not activated *)
+KebaPanelV1.inb_Freigabe[PANEL_M20] := TRUE;
+KebaPanelV1.inb_Freigabe[PANEL_M30] := TRUE;
+KebaPanelV1.inb_Freigabe[PANEL_M40] := TRUE;
+
+(* n.n. - only one mobile panel per cell
+IF KebaGetBedienungAktiv( 1 ) OR _KBR1 THEN
+	KebaPanelV1.inb_Freigabe[2] := FALSE;
+	KebaPanelV1.inb_Freigabe[3] := FALSE;
+	KebaPanelV1.inb_Freigabe[4] := FALSE;
+	KebaPanelV1.inb_Freigabe[5] := FALSE;
+END_IF
+IF KebaGetBedienungAktiv( 2 ) OR _KBR2 THEN
+	KebaPanelV1.inb_Freigabe[1] := FALSE;
+	KebaPanelV1.inb_Freigabe[3] := FALSE;
+	KebaPanelV1.inb_Freigabe[4] := FALSE;
+	KebaPanelV1.inb_Freigabe[5] := FALSE;
+END_IF
+IF KebaGetBedienungAktiv( 3 ) OR _KBR3 THEN
+	KebaPanelV1.inb_Freigabe[1] := FALSE;
+	KebaPanelV1.inb_Freigabe[2] := FALSE;
+	KebaPanelV1.inb_Freigabe[4] := FALSE;
+	KebaPanelV1.inb_Freigabe[5] := FALSE;
+END_IF
+IF KebaGetBedienungAktiv( 4 ) OR _KBR4 THEN
+	KebaPanelV1.inb_Freigabe[1] := FALSE;
+	KebaPanelV1.inb_Freigabe[2] := FALSE;
+	KebaPanelV1.inb_Freigabe[3] := FALSE;
+	KebaPanelV1.inb_Freigabe[5] := FALSE;
+END_IF
+IF KebaGetBedienungAktiv( 5 ) OR _KBR5 THEN
+	KebaPanelV1.inb_Freigabe[1] := FALSE;
+	KebaPanelV1.inb_Freigabe[2] := FALSE;
+	KebaPanelV1.inb_Freigabe[3] := FALSE;
+	KebaPanelV1.inb_Freigabe[4] := FALSE;
+END_IF
+*)
+KebaPanelV1();
+// KebaPanelV1._5_DatenZuruecksetzen();
+
+
+(* set safety count impuls *)
+bSafetyStroke := count1.igesamt;
+
+(* WPC Logistic *)
+_WPC_Logistic();
+
+(* _____________ *)
+(* == Modules == *)
+FOR _allModules := 1 TO MaxModule BY 1
+DO
+	g_bRefreshLcRecipe[_allModules] := FALSE;
+	IF 	Neustart  									(* if		restarting *) 
+	OR 	mz[_allModules].i_auto						(* 		or	changeover from manual -> auto impulse *)
+	OR	mz[_allModules].i_schutz					(* 		or	impulse guard doors have all been closed *)
+	OR	mz[_allModules].fl_ein						(* 		or	flag button "on" pressed *)
+	THEN
+		g_bRefreshLcRecipe[_allModules] := TRUE;	(* then		Update Line Controller Recipes for all Modules (Parameters may have been changed) *)
+	END_IF
+
+	
+END_FOR
+
+(* Modules *) 
+M10((* Placeholder *)
+	MoNr		:= 1, 
+	M_Zentrale	:= M20_Zentrale, 
+	MPart		:= Segment_1, 
+	CPart		:= 1
+);
+
+M20(
+	MoNr		:= 2, 
+	M_Zentrale	:= M20_Zentrale, 
+	MPart		:= Segment_1, 
+	CPart		:= 1
+);
+M30(
+	MoNr		:= 3, 
+	M_Zentrale	:= M30_Zentrale, 
+	MPart		:= Segment_1, 
+	CPart		:= 1
+);
+M40(
+	MoNr		:= 4, 
+	M_Zentrale	:= M40_Zentrale, 
+	MPart		:= Segment_1, 
+	CPart		:= 1
+);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(* ________________ *)
+(* -- Changeover -- *)
+TypwechselMPart1( Leergefahren:= (*mz[M10_Zentrale].mpart[Segment_1].leergefahren*) NOT immer0 , mpart:= Segment_1);
+IF TypwechselMPart1.Wechsel THEN
+	mz[M20_Zentrale		].mpart[Segment_1].hm_leer := TRUE;
+	mz[M30_Zentrale		].mpart[Segment_1].hm_leer := TRUE;
+	mz[M40_Zentrale		].mpart[Segment_1].hm_leer := TRUE;
+END_IF
+
+
+(* ______________________ *)
+(* -- Process Emptying -- *)
+mpart_M20.leergefahren_kommt:=
+				M20.bRt100_StopRoundTable
+		AND 	M20.bRt200_StopRoundTable 
+		AND 	M30.bRt100_StopRoundTable 
+		AND 	M40.bRt100_StopRoundTable 
+//		AND		(GetNumberOfParts(E_WORK_GRADE.M10_INTERNAL, E_WORK_GRADE.M20_RT200_DONE, srBad3, srGood4) = 0)
+		AND		mz[M20_Zentrale].mpart[Segment_1].hm_leer
+		AND NOT mz[M20_Zentrale].mpart[Segment_1].leergefahren;
+
+mpart_M30.leergefahren_kommt 		:= mpart_M20.leergefahren_kommt;
+mpart_M40.leergefahren_kommt 		:= mpart_M20.leergefahren_kommt;
+			
+
+mpart_M20.leergefahren_geht:=
+				mz[M20_Zentrale].mpart[Segment_1].leergefahren
+		AND NOT mz[M20_Zentrale].mpart[Segment_1].hm_leer	;
+mpart_M30.leergefahren_geht 	:= mpart_M20.leergefahren_geht;
+mpart_M40.leergefahren_geht 	:= mpart_M20.leergefahren_geht;
+
+ 
+
+mpart_M20(
+	s_leer		  := M20.s_leer,
+	automatenteil := Segment_1,
+	m			  := mz[M20_Zentrale],
+);
+
+mpart_M30(
+	s_leer		  := M20.s_leer,
+	automatenteil := Segment_1,
+	m			  := mz[M30_Zentrale],
+);
+mpart_M40(
+	s_leer		  := m20.s_leer,
+	automatenteil := Segment_1,
+	m			  := mz[M40_Zentrale],
+);
+
+(* ___________________ *)
+(* -- Total Counter -- *)
+IF TypwechselMpart1.Aufragswechsel 
+THEN
+	count1.z_aufumf:= ActOrd[Segment_1].ord_soll;
+	count1.z_aufgut:= 0;
+	count1.z_aufsch:= 0;
+	count1.z_schumf:= 50;
+END_IF;
+
+count1.igesamt := M20.RT_100.out_bStart;
+
+BDEIncCounter(
+	condition	:= count1.igut, 
+	no			:= bcGutteil, 
+	val			:= 1, 
+	order		:= ActOrd[Segment_1].ord_id, 
+	mpart		:= Segment_1 
+);
+z1(c:=count1);
+
+(* display for cycle time performance of machine *)
+TAKTE( count1.igesamt, 	TKTGesamt, 1 );		(* total cycles *)
+TAKTE( count1.igut, 	TKTGut, 1 );		(* num of cycles good parts *)
+TAKTE( count1.isch,		TKTSchlecht, 1);	(* num of cycles bad parts *)
+
+(* reset counter pulses after processing *)
+count1.igut		:= FALSE;
+count1.isch		:= FALSE;
+count1.ischlk	:= FALSE;
+count1.igesamt 	:= FALSE;
+count1.z_winkel	:= 0;
+
+(* Information for user *)
+BDE_Show();
+
+(* BDE *)
+(* to send telegrams i.e. BDECounter in Stations; IN for time of the machine in automatic mode *)
+automatikbetrieb := (mz[M20_Zentrale].betr_ein AND mz[M20_Zentrale].hm_auto);
+BDEControl(IN := automatikbetrieb);
+
+(* shutdown PC by UPS *)
+USV(USV_aktiv:= _PLC_M20_P1_GB1_I_O_4, USV_no_err:= _PLC_M20_P1_GB1_I_O_9); 
+
+(* prevent time shifts caused by windows time synchronisation *)
+TimeshiftPrevention(Aktiv:=TRUE,SyncTime:=T#6m);
+
+(* termination of step sequence diagnosis *)
+ExitAnlage();
+
+(* detection machine parameters have been changed *)
+MParam[MP_Change] := 0;
+
+(* process general reset and restart *)
+Urloeschen();
+
+
+fbSocketCloseAll(
+	sSrvNetId	:= '', 
+	bExecute	:= _bCloseAllSockets
+);
+_bCloseAllSockets := false;]]></ST>
+    </Implementation>
+    <Action Name="_WPC_Logistic" Id="{80e85e58-b4b4-4807-b671-98139cd1f28d}">
+      <Implementation>
+        <ST><![CDATA[
+(* _______________________________ *)
+(* == Belts for WPC Circulation == *)
+_BeltOn := g_arrWtPlace[cWpcPlaceM20_AtSt070_1		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM20_AtSt090		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM30_AtSt070		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM30_AtSt080		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM30_AtSt090		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM40_AtSt010		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM40_AtSt020		]._bBeltOn
+	OR	g_arrWtPlace[cWpcPlaceM40_AtSt070		]._bBeltOn;
+
+_005_M20_P1_QA1 := _BeltOn;	(* M20 Belt Forward Direction *)
+_005_M20_P1_QA2 := _BeltOn;	(* M20 Belt Backwards Direction *)
+
+_005_M30_P1_QA1 := _BeltOn;	(* M30 Belt Forward Direction *)
+_005_M30_P1_QA2 := _BeltOn;	(* M30 Belt Backwards Direction *)
+
+_005_M40_P1_QA1 := _BeltOn;	(* M40 Belt Forward Direction *)
+_005_M40_P1_QA2 := _BeltOn;	(* M40 Belt Backwards Direction *)
+	
+	
+IF Neustart OR g_bOnlineChange 
+THEN
+	(* set existance *)
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt070		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		].bExists		:= TRUE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		].bExists		:= TRUE;
+
+(* PBAIBN change minimum cycletime *)	
+	(* minimum intervall for transport of wpc *)
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		].tMinWpcCycletime	:= T#3S;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM30_AtSt070		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		].tMinWpcCycletime	:= T#1S;
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		].tMinWpcCycletime	:= T#1S;
+	
+	
+	(* set own adresses for wpc logistic *)
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		].iAdress 					:= cWpcPlaceM20_AtSt070_1;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		].iAdress 					:= cWpcPlaceM20_AtSt070_2;
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		].iAdress 					:= cWpcPlaceM20_AtSt090;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		].iAdress			 		:= cWpcPlaceM30_AtSt010_1;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		].iAdress		 			:= cWpcPlaceM30_AtSt010_2;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		].iAdress		 			:= cWpcPlaceM30_AtSt060_1;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		].iAdress		 			:= cWpcPlaceM30_AtSt060_2;
+	g_arrWtPlace[cWpcPlaceM30_AtSt070		].iAdress		 			:= cWpcPlaceM30_AtSt070;
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		].iAdress		 			:= cWpcPlaceM30_AtSt080;
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		].iAdress		 			:= cWpcPlaceM30_AtSt090;
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		].iAdress		 			:= cWpcPlaceM40_AtSt010;
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		].iAdress		 			:= cWpcPlaceM40_AtSt020;
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		].iAdress 					:= cWpcPlaceM40_AtSt070;
+	
+	(* set name *)
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		].sName_39digits 			:= '005 MM2/3 (§Stopper§ §at§ St.70.1)';
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		].sName_39digits			:= '005 MM5 (§Stopper§ §at§ St.70.2)';
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		].sName_39digits 			:= '005 MM1 (§Stopper§ §at§ St.90)';
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		].sName_39digits 			:= '005 MM1/2 (§Stopper§ §at§ St.10.1)';
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		].sName_39digits 			:= '005 MM4 (§Stopper§ §at§ St.10.2)';
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		].sName_39digits 			:= '005 MM6/7 (§Stopper§ §at§ St.60.1)';
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		].sName_39digits 			:= '005 MM9 (§Stopper§ §at§ St.60.2)';
+	g_arrWtPlace[cWpcPlaceM30_AtSt070		].sName_39digits 			:= '005 MM11/12 (§Stopper§ §at§ St.70)';
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		].sName_39digits 			:= '005 MM14/15 (§Stopper§ §at§ St.80)';
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		].sName_39digits 			:= '005 MM17/18 (§Stopper§ §at§ St.90)';
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		].sName_39digits 			:= '005 MM1/2 (§Stopper§ §at§ St.§10)';
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		].sName_39digits 			:= '005 MM4 (§Stopper§ §at§ St.20)';
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		].sName_39digits 			:= '005 MM6/7 (§Stopper§ §at§ St.70)';
+	
+	(* set short name 10 digits for mobile panel *)
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		].sShortName_10digits 		:= 'M20@070.1';
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		].sShortName_10digits		:= 'M20@070.2';
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		].sShortName_10digits 		:= 'M20@090  ';
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		].sShortName_10digits 		:= 'M30@010.1';
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		].sShortName_10digits 		:= 'M30@010.2';
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		].sShortName_10digits 		:= 'M30@060.1';
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		].sShortName_10digits 		:= 'M30@060.2';
+	g_arrWtPlace[cWpcPlaceM30_AtSt070		].sShortName_10digits 		:= 'M30@070  ';
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		].sShortName_10digits 		:= 'M30@080  ';
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		].sShortName_10digits 		:= 'M30@090  ';
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		].sShortName_10digits 		:= 'M40@010  ';
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		].sShortName_10digits 		:= 'M40@020  ';
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		].sShortName_10digits 		:= 'M40@070  ';
+
+
+	BDEAction[cActionM20_070_1_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM20_AtSt070_1	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM20_070_2_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM20_AtSt070_2	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM30_010_1_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM30_AtSt010_1	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM30_010_2_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM30_AtSt010_2	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM30_060_1_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM30_AtSt060_1	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM30_060_2_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM30_AtSt060_2	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM30_070_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM30_AtSt070	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM30_080_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM30_AtSt080	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM30_090_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM30_AtSt090	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');	
+	BDEAction[cActionM40_010_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM40_AtSt010	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');			
+	BDEAction[cActionM40_020_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM40_AtSt020	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+	BDEAction[cActionM40_070_WriteWpcId] 	:= CONCAT(g_arrWtPlace[	cWpcPlaceM40_AtSt070	].sShortName_10digits, ' §Id-System§ §write§ §WPC§ §nr.§');
+
+	
+	(* set if identsystem present *)
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		]._bHasWpcIdentification	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		]._bHasWpcIdentification 	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt070		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		]._bHasWpcIdentification 	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		]._bHasWpcIdentification 	:= TRUE;
+	
+	(* set if stopper has centering cylinder *)
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt070		]._bHasWpcCenteringCylinder	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		]._bHasWpcCenteringCylinder	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		]._bHasWpcCenteringCylinder	:= TRUE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		]._bHasWpcCenteringCylinder	:= FALSE;
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		]._bHasWpcCenteringCylinder	:= TRUE;
+	
+END_IF
+
+(* PBAIBN Put in stations instead of 0 *)
+(* give next adresses when identsystem present *)
+IF 	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_1		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM20_AtSt070_2		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM20_AtSt090		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM20_AtSt090		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_1		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt010_2		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_1		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt060_2		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM30_AtSt080		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt080		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM30_AtSt090		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM30_AtSt090		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM40_AtSt010		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM40_AtSt010		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM40_AtSt020		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM40_AtSt020		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+IF 	g_arrWtPlace[cWpcPlaceM40_AtSt070		]._bInitImpulseNextWpc THEN // reset adress when incoming next wpc so while wpc at station the targets can be overwrited
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		].iAdressNextGood		:= 0;
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		].iAdressNextBad		:= 0;
+	g_arrWtPlace[cWpcPlaceM40_AtSt070		].iAdressNextEmpty		:= cWpcPlaceM20_AtSt070_1;
+END_IF
+
+
+
+
+
+
+]]></ST>
+      </Implementation>
+    </Action>
+    <LineIds Name="MAIN">
+      <LineId Id="1906" Count="129" />
+      <LineId Id="2369" Count="0" />
+      <LineId Id="2371" Count="12" />
+      <LineId Id="2387" Count="0" />
+      <LineId Id="2370" Count="0" />
+      <LineId Id="2036" Count="47" />
+      <LineId Id="2085" Count="6" />
+      <LineId Id="2220" Count="0" />
+      <LineId Id="2318" Count="2" />
+      <LineId Id="2092" Count="3" />
+      <LineId Id="2102" Count="0" />
+      <LineId Id="2221" Count="0" />
+      <LineId Id="2321" Count="0" />
+      <LineId Id="2107" Count="4" />
+      <LineId Id="2113" Count="7" />
+      <LineId Id="2271" Count="0" />
+      <LineId Id="2121" Count="9" />
+      <LineId Id="2136" Count="32" />
+      <LineId Id="2322" Count="0" />
+      <LineId Id="2192" Count="27" />
+      <LineId Id="899" Count="0" />
+    </LineIds>
+    <LineIds Name="MAIN._WPC_Logistic">
+      <LineId Id="265" Count="3" />
+      <LineId Id="271" Count="2" />
+      <LineId Id="285" Count="0" />
+      <LineId Id="274" Count="4" />
+      <LineId Id="280" Count="1" />
+      <LineId Id="314" Count="0" />
+      <LineId Id="300" Count="0" />
+      <LineId Id="287" Count="0" />
+      <LineId Id="291" Count="0" />
+      <LineId Id="295" Count="0" />
+      <LineId Id="294" Count="0" />
+      <LineId Id="296" Count="0" />
+      <LineId Id="298" Count="0" />
+      <LineId Id="297" Count="0" />
+      <LineId Id="299" Count="0" />
+      <LineId Id="283" Count="0" />
+      <LineId Id="259" Count="2" />
+      <LineId Id="180" Count="0" />
+      <LineId Id="182" Count="0" />
+      <LineId Id="185" Count="11" />
+      <LineId Id="342" Count="0" />
+      <LineId Id="197" Count="0" />
+      <LineId Id="184" Count="0" />
+      <LineId Id="203" Count="12" />
+      <LineId Id="200" Count="1" />
+      <LineId Id="1" Count="0" />
+      <LineId Id="14" Count="0" />
+      <LineId Id="23" Count="0" />
+      <LineId Id="32" Count="0" />
+      <LineId Id="105" Count="0" />
+      <LineId Id="33" Count="1" />
+      <LineId Id="47" Count="0" />
+      <LineId Id="66" Count="1" />
+      <LineId Id="69" Count="3" />
+      <LineId Id="341" Count="0" />
+      <LineId Id="46" Count="0" />
+      <LineId Id="225" Count="0" />
+      <LineId Id="258" Count="0" />
+      <LineId Id="227" Count="10" />
+      <LineId Id="240" Count="1" />
+      <LineId Id="245" Count="0" />
+      <LineId Id="257" Count="0" />
+      <LineId Id="246" Count="10" />
+      <LineId Id="313" Count="0" />
+      <LineId Id="305" Count="0" />
+      <LineId Id="304" Count="0" />
+      <LineId Id="306" Count="0" />
+      <LineId Id="308" Count="4" />
+      <LineId Id="330" Count="0" />
+      <LineId Id="332" Count="0" />
+      <LineId Id="339" Count="0" />
+      <LineId Id="338" Count="0" />
+      <LineId Id="335" Count="0" />
+      <LineId Id="307" Count="0" />
+      <LineId Id="36" Count="0" />
+      <LineId Id="22" Count="0" />
+      <LineId Id="38" Count="2" />
+      <LineId Id="106" Count="0" />
+      <LineId Id="41" Count="0" />
+      <LineId Id="96" Count="3" />
+      <LineId Id="101" Count="3" />
+      <LineId Id="344" Count="0" />
+      <LineId Id="346" Count="12" />
+      <LineId Id="345" Count="0" />
+      <LineId Id="302" Count="0" />
+      <LineId Id="262" Count="0" />
+      <LineId Id="89" Count="0" />
+      <LineId Id="44" Count="0" />
+      <LineId Id="43" Count="0" />
+      <LineId Id="125" Count="0" />
+      <LineId Id="37" Count="0" />
+      <LineId Id="129" Count="3" />
+      <LineId Id="135" Count="2" />
+      <LineId Id="134" Count="0" />
+      <LineId Id="139" Count="5" />
+      <LineId Id="147" Count="2" />
+      <LineId Id="146" Count="0" />
+      <LineId Id="155" Count="24" />
+      <LineId Id="315" Count="3" />
+      <LineId Id="127" Count="0" />
+      <LineId Id="320" Count="3" />
+      <LineId Id="319" Count="0" />
+      <LineId Id="325" Count="3" />
+      <LineId Id="324" Count="0" />
+      <LineId Id="138" Count="0" />
+      <LineId Id="116" Count="0" />
+      <LineId Id="107" Count="0" />
+      <LineId Id="16" Count="1" />
+      <LineId Id="13" Count="0" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>
